@@ -103,8 +103,8 @@ let lastFetch = 0;
 // When a playlist is served, the next PREFETCH_COUNT segments are downloaded
 // immediately in the background. Cache hits are served from memory — zero CDN latency.
 const segmentCache = new Map(); // url -> { data: Buffer, contentType, fetchedAt }
-const SEGMENT_CACHE_TTL = 60 * 1000; // 60s — live segments go stale fast
-const PREFETCH_COUNT = 4;
+const SEGMENT_CACHE_TTL = 90 * 1000; // 90s — deeper buffer for live TV
+const PREFETCH_COUNT = 10;           // pre-fetch 10 segments ahead (~20-60s of video)
 
 // Evict stale entries every 30 seconds
 setInterval(() => {
@@ -277,7 +277,7 @@ function channelToStream(ch) {
 // ─── Manifest ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'community.freevie',
-  version: '2.0.4',
+  version: '2.0.5',
   name: 'Freevie — Live TV',
   description: 'Free live TV channels from USA & Canada. Open source, self-hostable.',
   types: ['tv'],
