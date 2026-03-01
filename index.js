@@ -7,6 +7,7 @@ const PORT = process.env.PORT || 7000;
 const CACHE_TTL = parseInt(process.env.CACHE_TTL) || 60 * 60 * 1000; // 1 hour
 const US_M3U_URL = process.env.US_M3U_URL || 'https://iptv-org.github.io/iptv/countries/us.m3u';
 const CA_M3U_URL = process.env.CA_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ca.m3u';
+const ADULT_M3U_URL = process.env.ADULT_M3U_URL || 'https://iptv-org.github.io/iptv/categories/xxx.m3u';
 // When set, all stream URLs are routed through this server as a relay proxy.
 // Example: PROXY_HOST=http://123.45.67.89:7000
 // Leave unset to serve original CDN URLs directly (local dev default).
@@ -93,6 +94,7 @@ function parseM3U(content, country) {
 // ─── Channel Store ────────────────────────────────────────────────────────────
 let usChannels = [];
 let caChannels = [];
+let adultChannels = [];
 let allChannels = [];
 let allGenres = [];
 let lastFetch = 0;
@@ -155,14 +157,16 @@ async function refreshChannels() {
   log('Fetching fresh channel lists...');
 
   try {
-    const [usRes, caRes] = await Promise.all([
+    const [usRes, caRes, adultRes] = await Promise.all([
       axios.get(US_M3U_URL, { timeout: 15000 }),
-      axios.get(CA_M3U_URL, { timeout: 15000 })
+      axios.get(CA_M3U_URL, { timeout: 15000 }),
+      axios.get(ADULT_M3U_URL, { timeout: 15000 }).catch(e => { log(`Adult fetch failed: ${e.message}`); return null; })
     ]);
 
     usChannels = parseM3U(usRes.data, 'us');
     caChannels = parseM3U(caRes.data, 'ca');
-    allChannels = [...usChannels, ...caChannels];
+    adultChannels = adultRes ? parseM3U(adultRes.data, 'adult') : [];
+    allChannels = [...usChannels, ...caChannels, ...adultChannels];
 
     // Collect unique genres
     const genreSet = new Set();
@@ -170,7 +174,7 @@ async function refreshChannels() {
     allGenres = [...genreSet].sort();
 
     lastFetch = now;
-    log(`Loaded ${usChannels.length} US + ${caChannels.length} CA = ${allChannels.length} total channels`);
+    log(`Loaded ${usChannels.length} US + ${caChannels.length} CA + ${adultChannels.length} Adult = ${allChannels.length} total channels`);
     log(`Found ${allGenres.length} genres: ${allGenres.slice(0, 15).join(', ')}...`);
 
     // Run async health check on a sample
@@ -220,7 +224,7 @@ async function runHealthCheck() {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function channelToMeta(ch) {
-  const countryFlag = ch.country === 'us' ? '🇺🇸 USA' : '🇨🇦 Canada';
+  const countryFlag = ch.country === 'us' ? '🇺🇸 USA' : ch.country === 'ca' ? '🇨🇦 Canada' : '🔞 Adult';
   const qualityBadge = ch.quality ? ` (${ch.quality})` : '';
 
   return {
@@ -273,7 +277,7 @@ function channelToStream(ch) {
 // ─── Manifest ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'community.freevie',
-  version: '2.0.3',
+  version: '2.0.4',
   name: 'Freevie — Live TV',
   description: 'Free live TV channels from USA & Canada. Open source, self-hostable.',
   types: ['tv'],
@@ -292,6 +296,16 @@ const manifest = {
       type: 'tv',
       id: 'freevie_ca',
       name: '🇨🇦 Canada TV',
+      extra: [
+        { name: 'genre', isRequired: false, options: [] },
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
+    },
+    {
+      type: 'tv',
+      id: 'freevie_adult',
+      name: '🔞 Adult',
       extra: [
         { name: 'genre', isRequired: false, options: [] },
         { name: 'search', isRequired: false },
@@ -327,6 +341,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   let pool;
   if (id === 'freevie_us') pool = usChannels;
   else if (id === 'freevie_ca') pool = caChannels;
+  else if (id === 'freevie_adult') pool = adultChannels;
   else pool = allChannels;
 
   let filtered = pool;
