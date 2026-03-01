@@ -1,27 +1,27 @@
-# 📺 Freevie — Free Live TV for Stremio
+# Freevie — Free Live TV for Stremio
 
 An open-source Stremio addon that streams **live USA & Canada TV channels** for free. Self-hostable, no accounts required.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D16-green.svg)
-![Version](https://img.shields.io/badge/version-2.0.0-orange.svg)
+![Version](https://img.shields.io/badge/version-2.0.1-orange.svg)
 
 ---
 
-## ✨ Features
+## Features
 
-- 🇺🇸🇨🇦 **500+ channels** — USA and Canada, auto-updated hourly from [iptv-org](https://github.com/iptv-org/iptv)
-- 🔍 **Search** — find channels by name directly in Stremio
-- 🏷️ **Browse by genre** — News, Sports, Kids, Entertainment, and 30+ categories
-- 🩺 **Stream health check** — dead streams flagged with ⚠️
-- 📡 **Alternative feeds** — multiple stream sources per channel when available
-- 🌐 **CORS enabled** — works from Stremio web client
-- ❤️ **Health endpoint** — `/health` for uptime monitoring
-- 💰 **Completely free** — no API keys, no debrid, no subscriptions
+- **500+ channels** — USA and Canada, auto-updated hourly from [iptv-org](https://github.com/iptv-org/iptv)
+- **Search** — find channels by name directly in Stremio
+- **Browse by genre** — News, Sports, Kids, Entertainment, and 30+ categories
+- **Stream health check** — dead streams flagged automatically
+- **Alternative feeds** — multiple stream sources per channel when available
+- **CORS enabled** — works from Stremio web client
+- **Health endpoint** — `/health` for uptime monitoring
+- **Completely free** — no API keys, no debrid, no subscriptions
 
 ---
 
-## 📲 Quick Install
+## Quick Install
 
 Paste this URL into Stremio's addon search bar:
 
@@ -33,7 +33,7 @@ http://YOUR_SERVER_IP:7000/manifest.json
 
 ---
 
-## 🚀 Deploy
+## Deploy
 
 ### Option 1: Render.com (free)
 
@@ -95,7 +95,7 @@ Then install: `http://localhost:7000/manifest.json`
 
 ---
 
-## ⚙️ Environment Variables
+## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
@@ -107,7 +107,7 @@ Then install: `http://localhost:7000/manifest.json`
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 | Problem | Fix |
 |---|---|
@@ -118,18 +118,18 @@ Then install: `http://localhost:7000/manifest.json`
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and ideas.
 
 ---
 
-## ⚠️ Disclaimer
+## Disclaimer
 
 This addon aggregates publicly available IPTV streams from [iptv-org/iptv](https://github.com/iptv-org/iptv). It does not host or re-stream any content. Use at your own risk and discretion.
 
 ---
 
-## 📄 License
+## License
 
 MIT — free to use, modify, and distribute.
