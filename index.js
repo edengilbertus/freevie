@@ -7,6 +7,10 @@ const PORT = process.env.PORT || 7000;
 const CACHE_TTL = parseInt(process.env.CACHE_TTL) || 60 * 60 * 1000; // 1 hour
 const US_M3U_URL = process.env.US_M3U_URL || 'https://iptv-org.github.io/iptv/countries/us.m3u';
 const CA_M3U_URL = process.env.CA_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ca.m3u';
+// When set, all stream URLs are routed through this server as a relay proxy.
+// Example: PROXY_HOST=http://123.45.67.89:7000
+// Leave unset to serve original CDN URLs directly (local dev default).
+const PROXY_HOST = process.env.PROXY_HOST ? process.env.PROXY_HOST.replace(/\/$/, '') : null;
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
 function log(msg) {
@@ -128,35 +132,41 @@ async function refreshChannels() {
   }
 }
 
-// ─── Health Check (async, non-blocking) ───────────────────────────────────────
+// ─── Health Check ─────────────────────────────────────────────────────────────
+let healthCheckDone = false;
+
 async function checkStreamHealth(channel) {
+  const start = Date.now();
   try {
     await axios.head(channel.url, {
-      timeout: 5000,
+      timeout: 6000,
       maxRedirects: 3,
       headers: channel.extraHeaders || {},
       validateStatus: (status) => status < 500
     });
     channel.healthy = true;
+    channel.responseMs = Date.now() - start;
   } catch {
     channel.healthy = false;
+    channel.responseMs = 99999;
   }
 }
 
+// Run in batches to avoid hammering servers but still check ALL channels
 async function runHealthCheck() {
-  // Check a random sample of channels (max 50) to avoid hammering servers
-  const sample = allChannels
-    .sort(() => Math.random() - 0.5)
-    .slice(0, 50);
+  const BATCH = 30;
+  const channels = [...allChannels];
+  log(`Running health check on all ${channels.length} channels in batches of ${BATCH}...`);
 
-  log(`Running health check on ${sample.length} channels...`);
+  for (let i = 0; i < channels.length; i += BATCH) {
+    const batch = channels.slice(i, i + BATCH);
+    await Promise.allSettled(batch.map(ch => checkStreamHealth(ch)));
+  }
 
-  const results = await Promise.allSettled(
-    sample.map(ch => checkStreamHealth(ch))
-  );
-
-  const healthy = sample.filter(ch => ch.healthy).length;
-  log(`Health check complete: ${healthy}/${sample.length} streams responding`);
+  const healthy = allChannels.filter(ch => ch.healthy).length;
+  const pct = Math.round((healthy / allChannels.length) * 100);
+  log(`Health check complete: ${healthy}/${allChannels.length} (${pct}%) streams live`);
+  healthCheckDone = true;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -178,27 +188,35 @@ function channelToMeta(ch) {
   };
 }
 
+// Build a proxied URL that routes through our relay server
+function buildProxyUrl(originalUrl, extraHeaders) {
+  if (!PROXY_HOST) return originalUrl;
+  const params = new URLSearchParams({ url: originalUrl });
+  if (extraHeaders) params.set('headers', JSON.stringify(extraHeaders));
+  return `${PROXY_HOST}/proxy?${params.toString()}`;
+}
+
 function channelToStream(ch) {
   const healthIcon = ch.healthy ? '🟢' : '⚠️';
   const qualityLabel = ch.quality || 'Live';
   const countryLabel = ch.country.toUpperCase();
+  const speedLabel = ch.responseMs && ch.responseMs < 99999
+    ? ` • ${ch.responseMs}ms`
+    : '';
+  const relayLabel = PROXY_HOST ? ' [Relay]' : '';
+
+  // Route through relay proxy when PROXY_HOST is configured
+  const streamUrl = buildProxyUrl(ch.url, ch.extraHeaders);
 
   const stream = {
-    url: ch.url,
-    name: `${healthIcon} ${qualityLabel}`,
-    title: `${ch.name} — ${countryLabel}`,
+    url: streamUrl,
+    name: `${healthIcon} ${qualityLabel}${speedLabel}${relayLabel}`,
+    description: `${ch.name} — ${countryLabel}`,
     behaviorHints: {
       notWebReady: true,
       bingeGroup: 'freevie-live'
     }
   };
-
-  // Add proxy headers if the stream requires them
-  if (ch.extraHeaders) {
-    stream.behaviorHints.proxyHeaders = {
-      request: ch.extraHeaders
-    };
-  }
 
   return stream;
 }
@@ -264,6 +282,11 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
   let filtered = pool;
 
+  // If health check is done, filter out dead streams from catalog
+  if (healthCheckDone) {
+    filtered = filtered.filter(ch => ch.healthy);
+  }
+
   // Genre filter
   if (extra?.genre) {
     const genre = extra.genre.toLowerCase();
@@ -301,7 +324,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
   return { meta: channelToMeta(ch) };
 });
 
-// Stream handler — returns all matching streams for a channel
+// Stream handler — returns all matching streams sorted fastest-first
 builder.defineStreamHandler(async ({ type, id }) => {
   if (type !== 'tv' || !id.startsWith('freevie:')) return { streams: [] };
 
@@ -318,13 +341,33 @@ builder.defineStreamHandler(async ({ type, id }) => {
     return altBase === baseName && alt.id !== ch.id;
   });
 
-  const streams = [channelToStream(ch)];
+  // Combine primary + alternatives, then sort for best stability
+  // Priority: healthy > fast response > prefer HD (FHD/4K freezes on free CDNs)
+  const QUALITY_SCORE = { 'SD': 0, '360p': 1, '240p': 2, 'HD': 3, 'FHD': 4, '4K': 5 };
 
-  // Add alternatives as extra streams
-  alternatives.forEach(alt => {
-    const stream = channelToStream(alt);
-    stream.name += ' (alt)';
-    streams.push(stream);
+  const candidates = [ch, ...alternatives]
+    // Drop streams that are dead OR took >3s to respond (will freeze/buffer badly)
+    .filter(c => c.healthy && (c.responseMs || 0) < 3000)
+    .sort((a, b) => {
+      // Faster response always wins
+      const msDiff = (a.responseMs || 99999) - (b.responseMs || 99999);
+      // Penalise FHD/4K: free CDNs can't sustain high bitrates reliably
+      const aQ = QUALITY_SCORE[a.quality] ?? 3; // unknown = treat as HD
+      const bQ = QUALITY_SCORE[b.quality] ?? 3;
+      // If one is HD and the other is FHD/4K, prefer HD if response is similar
+      const qualityPenalty = (aQ > 3 ? 500 : 0) - (bQ > 3 ? 500 : 0);
+      return msDiff + qualityPenalty;
+    });
+
+  // Fallback: if all streams got filtered, include unhealthy ones rather than returning nothing
+  const finalCandidates = candidates.length > 0
+    ? candidates
+    : [ch, ...alternatives].sort((a, b) => (a.responseMs || 99999) - (b.responseMs || 99999));
+
+  const streams = finalCandidates.map((candidate, i) => {
+    const stream = channelToStream(candidate);
+    if (i > 0) stream.name += ' (alt)';
+    return stream;
   });
 
   return { streams };
@@ -351,6 +394,7 @@ const server = http.createServer(async (req, res) => {
     const healthData = {
       status: 'ok',
       version: manifest.version,
+      proxy: PROXY_HOST ? { enabled: true, host: PROXY_HOST } : { enabled: false },
       channels: {
         us: usChannels.length,
         ca: caChannels.length,
@@ -366,7 +410,94 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Handle manifest with dynamic genre injection
+  // ─── Stream Proxy Relay ────────────────────────────────────────────────────
+  // GET /proxy?url=ENCODED_URL&headers=ENCODED_JSON
+  // - For HLS playlists (.m3u8): fetches, rewrites segment URLs, returns playlist
+  // - For everything else: pipes bytes straight through to Stremio
+  if (req.url.startsWith('/proxy')) {
+    const reqUrl = new URL(req.url, `http://localhost:${PORT}`);
+    const targetUrl = reqUrl.searchParams.get('url');
+    const headersParam = reqUrl.searchParams.get('headers');
+
+    if (!targetUrl) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing url parameter' }));
+      return;
+    }
+
+    let extraHeaders = {};
+    try {
+      if (headersParam) extraHeaders = JSON.parse(headersParam);
+    } catch (_) { }
+
+    try {
+      const upstream = await axios.get(targetUrl, {
+        responseType: 'stream',
+        timeout: 10000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; Freevie/2.0)',
+          ...extraHeaders
+        },
+        maxRedirects: 5
+      });
+
+      const contentType = upstream.headers['content-type'] || '';
+      const isHLS = targetUrl.includes('.m3u8') || contentType.includes('mpegurl');
+
+      if (isHLS) {
+        // Buffer the playlist, rewrite all URLs, then send
+        const chunks = [];
+        for await (const chunk of upstream.data) chunks.push(chunk);
+        const playlist = Buffer.concat(chunks).toString('utf8');
+
+        // Resolve base URL for relative segment paths
+        const base = new URL(targetUrl);
+        const baseDir = base.href.substring(0, base.href.lastIndexOf('/') + 1);
+
+        const rewritten = playlist.split('\n').map(line => {
+          const trimmed = line.trim();
+          // Skip comments and empty lines
+          if (!trimmed || trimmed.startsWith('#')) return line;
+          // Skip already-absolute URLs pointing to our own proxy
+          if (trimmed.startsWith(`${PROXY_HOST}/proxy`)) return line;
+          // Resolve the segment URL (may be relative or absolute)
+          let segUrl;
+          try {
+            segUrl = new URL(trimmed, baseDir).href;
+          } catch (_) {
+            return line; // can't parse, leave as-is
+          }
+          // Wrap through our proxy
+          const proxyParams = new URLSearchParams({ url: segUrl });
+          if (headersParam) proxyParams.set('headers', headersParam);
+          return `${PROXY_HOST}/proxy?${proxyParams.toString()}`;
+        }).join('\n');
+
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.apple.mpegurl',
+          'Cache-Control': 'no-cache'
+        });
+        res.end(rewritten);
+      } else {
+        // Binary stream: pipe directly through, forwarding content headers
+        res.writeHead(upstream.status, {
+          'Content-Type': contentType || 'video/mp2t',
+          'Cache-Control': 'no-cache',
+          ...(upstream.headers['content-length'] ? {
+            'Content-Length': upstream.headers['content-length']
+          } : {})
+        });
+        upstream.data.pipe(res);
+      }
+    } catch (err) {
+      log(`PROXY ERROR for ${targetUrl}: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Upstream fetch failed', detail: err.message }));
+      }
+    }
+    return;
+  }
   if (req.url === '/manifest.json' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
 

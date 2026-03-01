@@ -101,6 +101,7 @@ Then install: `http://localhost:7000/manifest.json`
 |---|---|---|
 | `PORT` | `7000` | Server port |
 | `CACHE_TTL` | `3600000` | Channel refresh interval in ms (default: 1 hour) |
+| `PROXY_HOST` | *(unset)* | **Stream relay** — set to your server's public URL (e.g. `http://1.2.3.4:7000`) to route all streams through your server for smoother playback. Only works when deployed on a public server. |
 | `US_M3U_URL` | iptv-org US | Custom M3U source for US channels |
 | `CA_M3U_URL` | iptv-org CA | Custom M3U source for CA channels |
 

@@ -10,3 +10,7 @@ services:
         value: 10000
       - key: CACHE_TTL
         value: 3600000
+      - key: PROXY_HOST
+        value: ""
+        # Set this to your Render URL, e.g: https://freevie.onrender.com
+        # This enables the stream relay for smoother playback
