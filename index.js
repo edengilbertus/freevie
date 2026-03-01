@@ -224,7 +224,7 @@ function channelToStream(ch) {
 // ─── Manifest ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'community.freevie',
-  version: '2.0.1',
+  version: '2.0.2',
   name: 'Freevie — Live TV',
   description: 'Free live TV channels from USA & Canada. Open source, self-hostable.',
   types: ['tv'],
@@ -411,9 +411,6 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Stream Proxy Relay ────────────────────────────────────────────────────
-  // GET /proxy?url=ENCODED_URL&headers=ENCODED_JSON
-  // - For HLS playlists (.m3u8): fetches, rewrites segment URLs, returns playlist
-  // - For everything else: pipes bytes straight through to Stremio
   if (req.url.startsWith('/proxy')) {
     const reqUrl = new URL(req.url, `http://localhost:${PORT}`);
     const targetUrl = reqUrl.searchParams.get('url');
@@ -430,44 +427,41 @@ const server = http.createServer(async (req, res) => {
       if (headersParam) extraHeaders = JSON.parse(headersParam);
     } catch (_) { }
 
+    // Shorter timeout for segments, longer for playlists
+    const isSegment = /\.(ts|aac|mp4|m4s|cmfv|cmfa)(\?|$)/i.test(targetUrl);
+    const timeout = isSegment ? 6000 : 12000;
+
     try {
       const upstream = await axios.get(targetUrl, {
         responseType: 'stream',
-        timeout: 10000,
+        timeout,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; Freevie/2.0)',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+          'Accept': '*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Connection': 'keep-alive',
           ...extraHeaders
         },
         maxRedirects: 5
       });
 
       const contentType = upstream.headers['content-type'] || '';
-      const isHLS = targetUrl.includes('.m3u8') || contentType.includes('mpegurl');
+      const isHLS = targetUrl.includes('.m3u8') || contentType.includes('mpegurl') || contentType.includes('x-mpegurl');
 
       if (isHLS) {
-        // Buffer the playlist, rewrite all URLs, then send
         const chunks = [];
         for await (const chunk of upstream.data) chunks.push(chunk);
         const playlist = Buffer.concat(chunks).toString('utf8');
 
-        // Resolve base URL for relative segment paths
         const base = new URL(targetUrl);
         const baseDir = base.href.substring(0, base.href.lastIndexOf('/') + 1);
 
         const rewritten = playlist.split('\n').map(line => {
           const trimmed = line.trim();
-          // Skip comments and empty lines
           if (!trimmed || trimmed.startsWith('#')) return line;
-          // Skip already-absolute URLs pointing to our own proxy
           if (trimmed.startsWith(`${PROXY_HOST}/proxy`)) return line;
-          // Resolve the segment URL (may be relative or absolute)
           let segUrl;
-          try {
-            segUrl = new URL(trimmed, baseDir).href;
-          } catch (_) {
-            return line; // can't parse, leave as-is
-          }
-          // Wrap through our proxy
+          try { segUrl = new URL(trimmed, baseDir).href; } catch (_) { return line; }
           const proxyParams = new URLSearchParams({ url: segUrl });
           if (headersParam) proxyParams.set('headers', headersParam);
           return `${PROXY_HOST}/proxy?${proxyParams.toString()}`;
@@ -475,22 +469,27 @@ const server = http.createServer(async (req, res) => {
 
         res.writeHead(200, {
           'Content-Type': 'application/vnd.apple.mpegurl',
-          'Cache-Control': 'no-cache'
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache, no-store'
         });
         res.end(rewritten);
       } else {
-        // Binary stream: pipe directly through, forwarding content headers
         res.writeHead(upstream.status, {
           'Content-Type': contentType || 'video/mp2t',
+          'Access-Control-Allow-Origin': '*',
           'Cache-Control': 'no-cache',
-          ...(upstream.headers['content-length'] ? {
-            'Content-Length': upstream.headers['content-length']
-          } : {})
+          ...(upstream.headers['content-length'] ? { 'Content-Length': upstream.headers['content-length'] } : {})
+        });
+        // Destroy upstream if client disconnects to free server resources
+        req.on('close', () => upstream.data.destroy());
+        upstream.data.on('error', (err) => {
+          log(`PROXY PIPE ERROR: ${err.message}`);
+          if (!res.writableEnded) res.end();
         });
         upstream.data.pipe(res);
       }
     } catch (err) {
-      log(`PROXY ERROR for ${targetUrl}: ${err.message}`);
+      log(`PROXY ERROR [${timeout}ms] ${targetUrl.slice(0, 80)}: ${err.message}`);
       if (!res.headersSent) {
         res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Upstream fetch failed', detail: err.message }));
