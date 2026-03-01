@@ -97,6 +97,55 @@ let allChannels = [];
 let allGenres = [];
 let lastFetch = 0;
 
+// ─── Segment Pre-fetch Cache ───────────────────────────────────────────────────────
+// When a playlist is served, the next PREFETCH_COUNT segments are downloaded
+// immediately in the background. Cache hits are served from memory — zero CDN latency.
+const segmentCache = new Map(); // url -> { data: Buffer, contentType, fetchedAt }
+const SEGMENT_CACHE_TTL = 60 * 1000; // 60s — live segments go stale fast
+const PREFETCH_COUNT = 4;
+
+// Evict stale entries every 30 seconds
+setInterval(() => {
+  const now = Date.now();
+  let evicted = 0;
+  for (const [url, entry] of segmentCache) {
+    if (!entry || now - entry.fetchedAt > SEGMENT_CACHE_TTL) {
+      segmentCache.delete(url);
+      evicted++;
+    }
+  }
+  if (evicted > 0) log(`Segment cache: evicted ${evicted}, remaining ${segmentCache.size}`);
+}, 30 * 1000);
+
+const PROXY_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+  'Accept': '*/*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Connection': 'keep-alive'
+};
+
+async function prefetchSegments(urls, extraHeaders) {
+  for (const url of urls) {
+    if (segmentCache.has(url)) continue; // already cached or in-flight
+    segmentCache.set(url, null); // placeholder to prevent duplicate fetches
+    axios.get(url, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: { ...PROXY_HEADERS, ...extraHeaders },
+      maxRedirects: 5
+    }).then(resp => {
+      segmentCache.set(url, {
+        data: Buffer.from(resp.data),
+        contentType: resp.headers['content-type'] || 'video/mp2t',
+        fetchedAt: Date.now()
+      });
+    }).catch(err => {
+      segmentCache.delete(url);
+      log(`Prefetch miss ${url.slice(0, 70)}: ${err.message}`);
+    });
+  }
+}
+
 async function refreshChannels() {
   const now = Date.now();
   if (allChannels.length > 0 && now - lastFetch < CACHE_TTL) {
@@ -224,7 +273,7 @@ function channelToStream(ch) {
 // ─── Manifest ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'community.freevie',
-  version: '2.0.2',
+  version: '2.0.3',
   name: 'Freevie — Live TV',
   description: 'Free live TV channels from USA & Canada. Open source, self-hostable.',
   types: ['tv'],
@@ -410,7 +459,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ─── Stream Proxy Relay ────────────────────────────────────────────────────
+  // ─── Stream Proxy Relay ───────────────────────────────────────────────────────
   if (req.url.startsWith('/proxy')) {
     const reqUrl = new URL(req.url, `http://localhost:${PORT}`);
     const targetUrl = reqUrl.searchParams.get('url');
@@ -427,6 +476,19 @@ const server = http.createServer(async (req, res) => {
       if (headersParam) extraHeaders = JSON.parse(headersParam);
     } catch (_) { }
 
+    // ── Cache hit: serve segment from memory instantly, no CDN round-trip ───────────
+    const cached = segmentCache.get(targetUrl);
+    if (cached && cached.data && (Date.now() - cached.fetchedAt) < SEGMENT_CACHE_TTL) {
+      res.writeHead(200, {
+        'Content-Type': cached.contentType,
+        'Access-Control-Allow-Origin': '*',
+        'Content-Length': cached.data.length,
+        'X-Cache': 'HIT'
+      });
+      res.end(cached.data);
+      return;
+    }
+
     // Shorter timeout for segments, longer for playlists
     const isSegment = /\.(ts|aac|mp4|m4s|cmfv|cmfa)(\?|$)/i.test(targetUrl);
     const timeout = isSegment ? 6000 : 12000;
@@ -435,13 +497,7 @@ const server = http.createServer(async (req, res) => {
       const upstream = await axios.get(targetUrl, {
         responseType: 'stream',
         timeout,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-          'Accept': '*/*',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Connection': 'keep-alive',
-          ...extraHeaders
-        },
+        headers: { ...PROXY_HEADERS, ...extraHeaders },
         maxRedirects: 5
       });
 
@@ -455,6 +511,17 @@ const server = http.createServer(async (req, res) => {
 
         const base = new URL(targetUrl);
         const baseDir = base.href.substring(0, base.href.lastIndexOf('/') + 1);
+
+        // Collect original segment URLs for pre-fetching BEFORE rewriting
+        const toPreFetch = playlist.split('\n')
+          .map(l => l.trim())
+          .filter(l => l && !l.startsWith('#'))
+          .map(l => { try { return new URL(l, baseDir).href; } catch (_) { return null; } })
+          .filter(Boolean)
+          .slice(0, PREFETCH_COUNT);
+
+        // Fire-and-forget: start downloading next segments immediately
+        prefetchSegments(toPreFetch, extraHeaders);
 
         const rewritten = playlist.split('\n').map(line => {
           const trimmed = line.trim();
@@ -480,7 +547,6 @@ const server = http.createServer(async (req, res) => {
           'Cache-Control': 'no-cache',
           ...(upstream.headers['content-length'] ? { 'Content-Length': upstream.headers['content-length'] } : {})
         });
-        // Destroy upstream if client disconnects to free server resources
         req.on('close', () => upstream.data.destroy());
         upstream.data.on('error', (err) => {
           log(`PROXY PIPE ERROR: ${err.message}`);
