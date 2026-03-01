@@ -7,6 +7,8 @@ const PORT = process.env.PORT || 7000;
 const CACHE_TTL = parseInt(process.env.CACHE_TTL) || 60 * 60 * 1000; // 1 hour
 const US_M3U_URL = process.env.US_M3U_URL || 'https://iptv-org.github.io/iptv/countries/us.m3u';
 const CA_M3U_URL = process.env.CA_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ca.m3u';
+// Samsung TV Plus US — 500+ free, ad-supported FAST channels with reliable CDN
+const SAMSUNG_M3U_URL = process.env.SAMSUNG_M3U_URL || 'https://apsattv.com/ssungusa.m3u';
 // When set, all stream URLs are routed through this server as a relay proxy.
 // Example: PROXY_HOST=http://123.45.67.89:7000
 // Leave unset to serve original CDN URLs directly (local dev default).
@@ -93,6 +95,7 @@ function parseM3U(content, country) {
 // ─── Channel Store ────────────────────────────────────────────────────────────
 let usChannels = [];
 let caChannels = [];
+let samsungChannels = [];
 let allChannels = [];
 let allGenres = [];
 let lastFetch = 0;
@@ -106,14 +109,16 @@ async function refreshChannels() {
   log('Fetching fresh channel lists...');
 
   try {
-    const [usRes, caRes] = await Promise.all([
+    const [usRes, caRes, samsungRes] = await Promise.all([
       axios.get(US_M3U_URL, { timeout: 15000 }),
-      axios.get(CA_M3U_URL, { timeout: 15000 })
+      axios.get(CA_M3U_URL, { timeout: 15000 }),
+      axios.get(SAMSUNG_M3U_URL, { timeout: 15000 }).catch(e => { log(`Samsung fetch failed: ${e.message}`); return null; })
     ]);
 
     usChannels = parseM3U(usRes.data, 'us');
     caChannels = parseM3U(caRes.data, 'ca');
-    allChannels = [...usChannels, ...caChannels];
+    samsungChannels = samsungRes ? parseM3U(samsungRes.data, 'samsung') : [];
+    allChannels = [...usChannels, ...caChannels, ...samsungChannels];
 
     // Collect unique genres
     const genreSet = new Set();
@@ -121,7 +126,7 @@ async function refreshChannels() {
     allGenres = [...genreSet].sort();
 
     lastFetch = now;
-    log(`Loaded ${usChannels.length} US + ${caChannels.length} CA = ${allChannels.length} total channels`);
+    log(`Loaded ${usChannels.length} US + ${caChannels.length} CA + ${samsungChannels.length} Samsung = ${allChannels.length} total channels`);
     log(`Found ${allGenres.length} genres: ${allGenres.slice(0, 15).join(', ')}...`);
 
     // Run async health check on a sample
@@ -171,7 +176,7 @@ async function runHealthCheck() {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function channelToMeta(ch) {
-  const countryFlag = ch.country === 'us' ? '🇺🇸 USA' : '🇨🇦 Canada';
+  const countryFlag = ch.country === 'us' ? '🇺🇸 USA' : ch.country === 'ca' ? '🇨🇦 Canada' : '📱 Samsung TV+';
   const qualityBadge = ch.quality ? ` (${ch.quality})` : '';
 
   return {
@@ -224,11 +229,21 @@ function channelToStream(ch) {
 // ─── Manifest ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'community.freevie',
-  version: '2.0.0',
+  version: '2.1.0',
   name: 'Freevie — Live TV',
   description: 'Free live TV channels from USA & Canada. Open source, self-hostable.',
   types: ['tv'],
   catalogs: [
+    {
+      type: 'tv',
+      id: 'freevie_samsung',
+      name: '📱 Samsung TV+ (FAST)',
+      extra: [
+        { name: 'genre', isRequired: false, options: [] },
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
+    },
     {
       type: 'tv',
       id: 'freevie_us',
@@ -278,6 +293,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   let pool;
   if (id === 'freevie_us') pool = usChannels;
   else if (id === 'freevie_ca') pool = caChannels;
+  else if (id === 'freevie_samsung') pool = samsungChannels;
   else pool = allChannels;
 
   let filtered = pool;
