@@ -181,10 +181,27 @@ async function refreshChannels() {
   log('Fetching fresh channel lists...');
 
   try {
+    // Fetch US + CA with keep-alive agents, adult with retry
+    const fetchAdult = async () => {
+      try {
+        const r = await axios.get(ADULT_M3U_URL, { timeout: 20000, httpAgent, httpsAgent });
+        return r;
+      } catch (e) {
+        log(`Adult fetch attempt 1 failed (${e.message}), retrying...`);
+        try {
+          const r = await axios.get(ADULT_M3U_URL, { timeout: 25000 });
+          return r;
+        } catch (e2) {
+          log(`Adult fetch attempt 2 failed (${e2.message}) — status: ${e2.response?.status || 'no response'} — adult channels will be empty`);
+          return null;
+        }
+      }
+    };
+
     const [usRes, caRes, adultRes] = await Promise.all([
-      axios.get(US_M3U_URL, { timeout: 15000 }),
-      axios.get(CA_M3U_URL, { timeout: 15000 }),
-      axios.get(ADULT_M3U_URL, { timeout: 15000 }).catch(e => { log(`Adult fetch failed: ${e.message}`); return null; })
+      axios.get(US_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
+      axios.get(CA_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
+      fetchAdult()
     ]);
 
     usChannels = parseM3U(usRes.data, 'us');
@@ -301,7 +318,7 @@ function channelToStream(ch) {
 // ─── Manifest ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'community.freevie',
-  version: '2.1.0',
+  version: '2.1.1',
   name: 'Freevie — Live TV',
   description: 'Free live TV channels from USA & Canada. Open source, self-hostable.',
   types: ['tv'],
@@ -544,9 +561,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Shorter timeout for segments, longer for playlists
+    // Segments: 4s timeout — fast fail so Stremio retries immediately instead
+    // of freezing for 6 full seconds on a slow CDN response.
+    // Playlists: 12s — they're small text files, extra time is fine.
     const isSegment = /\.(ts|aac|mp4|m4s|cmfv|cmfa)(\?|$)/i.test(targetUrl);
-    const timeout = isSegment ? 6000 : 12000;
+    const timeout = isSegment ? 4000 : 12000;
 
     try {
       const upstream = await axios.get(targetUrl, {
@@ -615,7 +634,21 @@ const server = http.createServer(async (req, res) => {
         upstream.data.pipe(res);
       }
     } catch (err) {
-      log(`PROXY ERROR [${timeout}ms] ${targetUrl.slice(0, 80)}: ${err.message}`);
+      const status = err.response?.status;
+      const isTokenExpiry = status === 403 || status === 401;
+      const isRateLimit = status === 429;
+      const isMissing = status === 404;
+      const label = isTokenExpiry ? 'TOKEN/AUTH EXPIRED'
+        : isRateLimit ? 'RATE LIMITED'
+          : isMissing ? 'STREAM GONE (404)'
+            : err.code === 'ECONNABORTED' ? `TIMEOUT [${timeout}ms]`
+              : err.code || 'UPSTREAM ERROR';
+      log(`PROXY ${label} ${targetUrl.slice(0, 80)}: ${err.message}`);
+      // On token expiry or rate limit, clear playlist cache so next poll gets fresh URLs
+      if (isTokenExpiry || isRateLimit) {
+        playlistCache.delete(targetUrl);
+        log(`Cleared playlist cache for ${targetUrl.slice(0, 60)} to force fresh token`);
+      }
       if (!res.headersSent) {
         res.writeHead(502, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Upstream fetch failed', detail: err.message }));
