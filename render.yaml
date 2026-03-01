@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: freevie
+    env: node
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: CACHE_TTL
+        value: 3600000

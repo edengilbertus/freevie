@@ -1,0 +1,31 @@
+{
+  "name": "freevie",
+  "version": "2.0.0",
+  "description": "Free, open-source Stremio addon for live USA & Canada TV channels",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "npx nodemon index.js"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10",
+    "axios": "^1.6.0"
+  },
+  "keywords": [
+    "stremio",
+    "addon",
+    "iptv",
+    "live-tv",
+    "usa",
+    "canada",
+    "free"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/freevie"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  }
+}
