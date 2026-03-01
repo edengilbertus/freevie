@@ -1,6 +1,13 @@
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const axios = require('axios');
 const http = require('http');
+const https = require('https');
+
+// ─── Persistent HTTP agents (keep-alive connection pooling) ───────────────────
+// Reuse TCP connections to CDNs instead of a new handshake per segment.
+// Each connection saved = ~50-200ms latency cut per segment request.
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50, keepAliveMsecs: 3000 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, keepAliveMsecs: 3000 });
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 7000;
@@ -99,12 +106,23 @@ let allChannels = [];
 let allGenres = [];
 let lastFetch = 0;
 
-// ─── Segment Pre-fetch Cache ───────────────────────────────────────────────────────
+// ─── Segment Pre-fetch Cache ─────────────────────────────────────────────────
 // When a playlist is served, the next PREFETCH_COUNT segments are downloaded
 // immediately in the background. Cache hits are served from memory — zero CDN latency.
 const segmentCache = new Map(); // url -> { data: Buffer, contentType, fetchedAt }
 const SEGMENT_CACHE_TTL = 90 * 1000; // 90s — deeper buffer for live TV
-const PREFETCH_COUNT = 10;           // pre-fetch 10 segments ahead (~20-60s of video)
+const PREFETCH_COUNT = 10;         // segments to pre-fetch ahead (~20-60s of video)
+
+// ─── Playlist Cache ───────────────────────────────────────────────────────────
+// Stremio polls the .m3u8 playlist every 2s. Cache the rewritten playlist for
+// 4s to cut CDN hits by ~50% with zero quality impact.
+const playlistCache = new Map(); // url -> { content, fetchedAt }
+const PLAYLIST_CACHE_TTL = 4 * 1000; // 4s
+
+// ─── Concurrent Prefetch Limiter ──────────────────────────────────────────────
+// Prevent CDN/server overload when multiple viewers are active simultaneously.
+const MAX_CONCURRENT_PREFETCHES = 6;
+let activePrefetches = 0;
 
 // Evict stale entries every 30 seconds
 setInterval(() => {
@@ -115,6 +133,9 @@ setInterval(() => {
       segmentCache.delete(url);
       evicted++;
     }
+  }
+  for (const [url, entry] of playlistCache) {
+    if (now - entry.fetchedAt > PLAYLIST_CACHE_TTL * 5) playlistCache.delete(url);
   }
   if (evicted > 0) log(`Segment cache: evicted ${evicted}, remaining ${segmentCache.size}`);
 }, 30 * 1000);
@@ -129,11 +150,14 @@ const PROXY_HEADERS = {
 async function prefetchSegments(urls, extraHeaders) {
   for (const url of urls) {
     if (segmentCache.has(url)) continue; // already cached or in-flight
+    if (activePrefetches >= MAX_CONCURRENT_PREFETCHES) break; // don't overload CDN
     segmentCache.set(url, null); // placeholder to prevent duplicate fetches
+    activePrefetches++;
     axios.get(url, {
       responseType: 'arraybuffer',
       timeout: 10000,
       headers: { ...PROXY_HEADERS, ...extraHeaders },
+      httpAgent, httpsAgent,
       maxRedirects: 5
     }).then(resp => {
       segmentCache.set(url, {
@@ -144,7 +168,7 @@ async function prefetchSegments(urls, extraHeaders) {
     }).catch(err => {
       segmentCache.delete(url);
       log(`Prefetch miss ${url.slice(0, 70)}: ${err.message}`);
-    });
+    }).finally(() => { activePrefetches--; });
   }
 }
 
@@ -277,7 +301,7 @@ function channelToStream(ch) {
 // ─── Manifest ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'community.freevie',
-  version: '2.0.5',
+  version: '2.1.0',
   name: 'Freevie — Live TV',
   description: 'Free live TV channels from USA & Canada. Open source, self-hostable.',
   types: ['tv'],
@@ -491,7 +515,23 @@ const server = http.createServer(async (req, res) => {
       if (headersParam) extraHeaders = JSON.parse(headersParam);
     } catch (_) { }
 
-    // ── Cache hit: serve segment from memory instantly, no CDN round-trip ───────────
+    // ── Playlist cache hit: serve rewritten .m3u8 from memory (no CDN round-trip) ──
+    const isPlaylist = targetUrl.includes('.m3u8') || targetUrl.includes('m3u');
+    if (isPlaylist) {
+      const cachedPlaylist = playlistCache.get(targetUrl);
+      if (cachedPlaylist && (Date.now() - cachedPlaylist.fetchedAt) < PLAYLIST_CACHE_TTL) {
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.apple.mpegurl',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache, no-store',
+          'X-Cache': 'PLAYLIST-HIT'
+        });
+        res.end(cachedPlaylist.content);
+        return;
+      }
+    }
+
+    // ── Segment cache hit: serve segment from memory instantly, no CDN round-trip ──
     const cached = segmentCache.get(targetUrl);
     if (cached && cached.data && (Date.now() - cached.fetchedAt) < SEGMENT_CACHE_TTL) {
       res.writeHead(200, {
@@ -513,6 +553,7 @@ const server = http.createServer(async (req, res) => {
         responseType: 'stream',
         timeout,
         headers: { ...PROXY_HEADERS, ...extraHeaders },
+        httpAgent, httpsAgent,
         maxRedirects: 5
       });
 
@@ -548,6 +589,10 @@ const server = http.createServer(async (req, res) => {
           if (headersParam) proxyParams.set('headers', headersParam);
           return `${PROXY_HOST}/proxy?${proxyParams.toString()}`;
         }).join('\n');
+
+        // Cache the rewritten playlist for 4s — Stremio polls every 2s so this
+        // halves CDN hits with no quality impact on live streams.
+        playlistCache.set(targetUrl, { content: rewritten, fetchedAt: Date.now() });
 
         res.writeHead(200, {
           'Content-Type': 'application/vnd.apple.mpegurl',
