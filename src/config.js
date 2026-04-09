@@ -30,13 +30,30 @@ const US_M3U_URL = process.env.US_M3U_URL || 'https://iptv-org.github.io/iptv/co
 const CA_M3U_URL = process.env.CA_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ca.m3u';
 const UG_M3U_URL = process.env.UG_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ug.m3u';
 const DEFAULT_EXTRA_M3U_URLS = [
+  // British Isles
   'https://iptv-org.github.io/iptv/countries/gb.m3u',
   'https://iptv-org.github.io/iptv/countries/ie.m3u',
+  // Arabic / Middle East
   'https://iptv-org.github.io/iptv/countries/qa.m3u',
   'https://iptv-org.github.io/iptv/countries/ae.m3u',
   'https://iptv-org.github.io/iptv/countries/sa.m3u',
+  'https://iptv-org.github.io/iptv/countries/eg.m3u',
+  'https://iptv-org.github.io/iptv/countries/ma.m3u',
+  // Western Europe (football-rich)
   'https://iptv-org.github.io/iptv/countries/fr.m3u',
   'https://iptv-org.github.io/iptv/countries/es.m3u',
+  'https://iptv-org.github.io/iptv/countries/de.m3u',
+  'https://iptv-org.github.io/iptv/countries/it.m3u',
+  'https://iptv-org.github.io/iptv/countries/nl.m3u',
+  'https://iptv-org.github.io/iptv/countries/pt.m3u',
+  // Balkans / Eastern Europe
+  'https://iptv-org.github.io/iptv/countries/al.m3u',
+  'https://iptv-org.github.io/iptv/countries/rs.m3u',
+  'https://iptv-org.github.io/iptv/countries/ba.m3u',
+  'https://iptv-org.github.io/iptv/countries/hr.m3u',
+  'https://iptv-org.github.io/iptv/countries/ro.m3u',
+  'https://iptv-org.github.io/iptv/countries/tr.m3u',
+  // Africa
   'https://iptv-org.github.io/iptv/countries/ke.m3u',
   'https://iptv-org.github.io/iptv/countries/ng.m3u',
   'https://iptv-org.github.io/iptv/countries/za.m3u'

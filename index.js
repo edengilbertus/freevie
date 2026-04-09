@@ -85,11 +85,16 @@ function dedupeChannels(channels) {
 function formatRegionLabel(country) {
   const normalized = String(country || '').trim().toLowerCase();
   if (!normalized || normalized === 'global') return 'Global';
-  if (normalized === 'us') return 'USA';
-  if (normalized === 'ca') return 'Canada';
-  if (normalized === 'ug') return 'Uganda';
-  if (normalized === 'adult') return 'Adult';
-  return normalized
+  const TABLE = {
+    us: 'USA', ca: 'Canada', ug: 'Uganda', adult: 'Adult',
+    gb: 'United Kingdom', uk: 'United Kingdom', ie: 'Ireland',
+    fr: 'France', de: 'Germany', es: 'Spain', it: 'Italy',
+    nl: 'Netherlands', pt: 'Portugal', al: 'Albania',
+    rs: 'Serbia', ba: 'Bosnia', hr: 'Croatia', ro: 'Romania', tr: 'Turkey',
+    qa: 'Qatar', ae: 'UAE', sa: 'Saudi Arabia', eg: 'Egypt', ma: 'Morocco',
+    ke: 'Kenya', ng: 'Nigeria', za: 'South Africa'
+  };
+  return TABLE[normalized] || normalized
     .split(/[_\-\s]+/)
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -351,7 +356,7 @@ async function runHealthCheck() {
 
 function channelToMeta(ch) {
   const regionLabel = formatRegionLabel(ch.country);
-  const qualityBadge = ch.quality ? ` (${ch.quality})` : '';
+  const qualityBadge = ch.quality ? ` [${ch.quality}]` : '';
   const genres = [ch.primaryGroup, regionLabel].filter((value, index, list) => list.indexOf(value) === index);
 
   return {
@@ -361,7 +366,8 @@ function channelToMeta(ch) {
     poster: ch.poster || ch.logo || undefined,
     logo: ch.logo || ch.poster || undefined,
     posterShape: 'square',
-    description: `Live TV: ${ch.displayName || ch.name}${qualityBadge} — ${regionLabel}`,
+    // Clean description: just region + quality so clients don't show "Live TV: Name (FHD) — Qa"
+    description: `${regionLabel}${qualityBadge}`,
     genres,
     links: [],
     background: ch.poster || ch.logo || undefined
@@ -408,11 +414,21 @@ function channelToStream(ch) {
 
 const manifest = {
   id: 'community.freevie',
-  version: '2.2.1',
+  version: '2.3.0',
   name: 'Freevie Live TV',
-  description: 'Free live TV channels from USA, Canada & Uganda. Open source, self-hostable.',
+  description: 'Free live TV channels from USA, Canada, UK, Europe, Africa & the Middle East. Open source, self-hostable.',
   types: ['tv'],
   catalogs: [
+    {
+      type: 'tv',
+      id: 'freevie_sports',
+      name: '⚽ Sports',
+      extra: [
+        { name: 'genre', isRequired: false, options: [] },
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
+    },
     {
       type: 'tv',
       id: 'freevie_us',
@@ -425,8 +441,38 @@ const manifest = {
     },
     {
       type: 'tv',
+      id: 'freevie_uk',
+      name: 'UK TV',
+      extra: [
+        { name: 'genre', isRequired: false, options: [] },
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
+    },
+    {
+      type: 'tv',
       id: 'freevie_ca',
       name: 'Canada TV',
+      extra: [
+        { name: 'genre', isRequired: false, options: [] },
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
+    },
+    {
+      type: 'tv',
+      id: 'freevie_eu',
+      name: '🇪🇺 European TV',
+      extra: [
+        { name: 'genre', isRequired: false, options: [] },
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
+    },
+    {
+      type: 'tv',
+      id: 'freevie_arabic',
+      name: '🌙 Arabic TV',
       extra: [
         { name: 'genre', isRequired: false, options: [] },
         { name: 'search', isRequired: false },
@@ -478,11 +524,21 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
   await refreshChannels();
 
+  // Country sets for regional pools
+  const EU_COUNTRIES = new Set(['fr', 'de', 'es', 'it', 'nl', 'pt', 'al', 'rs', 'ba', 'hr', 'ro', 'tr', 'gb', 'ie']);
+  const ARABIC_COUNTRIES = new Set(['qa', 'ae', 'sa', 'eg', 'ma']);
+
   let pool;
   if (id === 'freevie_us') pool = usChannels;
   else if (id === 'freevie_ca') pool = caChannels;
   else if (id === 'freevie_ug') pool = ugChannels;
   else if (id === 'freevie_adult') pool = adultChannels;
+  else if (id === 'freevie_uk') pool = extraChannels.filter(ch => ['gb', 'ie'].includes(ch.country));
+  else if (id === 'freevie_eu') pool = extraChannels.filter(ch => EU_COUNTRIES.has(ch.country));
+  else if (id === 'freevie_arabic') pool = extraChannels.filter(ch => ARABIC_COUNTRIES.has(ch.country));
+  else if (id === 'freevie_sports') {
+    pool = allChannels.filter(ch => ch.primaryGroup === 'Sports' || (ch.groups || []).some(g => /sport|football|soccer/i.test(g)));
+  }
   else pool = allChannels;
 
   let filtered = pool;

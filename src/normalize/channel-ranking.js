@@ -13,12 +13,30 @@ const CATEGORY_PRIORITY = [
 ];
 
 const CATEGORY_RULES = [
-  { category: 'Sports', patterns: ['sports', 'sport', 'football', 'soccer', 'nba', 'nfl', 'mlb', 'ufc', 'boxing', 'fight', 'cricket', 'tennis', 'golf', 'motorsport', 'formula', 'espn', 'bein', 'supersport', 'sky sports', 'tnt sports', 'bt sport', 'premier sports', 'eurosport', 'dazn'] },
-  { category: 'Movies', patterns: ['movie', 'movies', 'cinema', 'film', 'films', 'hbo', 'showtime'] },
-  { category: 'News', patterns: ['news', 'cnn', 'bbc', 'al jazeera', 'cnbc', 'bloomberg', 'msnbc', 'fox news'] },
-  { category: 'Kids', patterns: ['kids', 'kid', 'cartoon', 'cartoons', 'cartoon network', 'cartoonito', 'disney', 'disney junior', 'disney xd', 'nick', 'nick jr', 'nickelodeon', 'boomerang'] },
+  { category: 'Sports', patterns: [
+    // Generic
+    'sports', 'sport', 'football', 'soccer', 'ufc', 'boxing', 'fight', 'cricket', 'tennis',
+    'golf', 'motorsport', 'formula', 'f1', 'rugby', 'cycling', 'athletics',
+    // US / Canada
+    'nba', 'nfl', 'mlb', 'nhl',
+    // UK / Europe sports brands
+    'espn', 'bein', 'bein sports', 'sky sports', 'tnt sports', 'bt sport', 'bt sports',
+    'premier sports', 'eurosport', 'dazn', 'eleven sports', 'eleven',
+    'canal+ sport', 'canal plus sport', 'movistar+', 'movistar laliga',
+    'mediaset sport', 'sport italia', 'sky sport', 'sport 1', 'sport 2',
+    'la liga tv', 'laliga tv', 'serie a', 'ligue 1',
+    // African / Arabic sports
+    'supersport', 'super sport', 'ssc', 'osn sports', 'startimes sport',
+    'azam sport', 'wazito sport', 'canal+ afrique', 'arab sport',
+    // European leagues
+    'champions league', 'europa league', 'conference league', 'premier league',
+    'bundesliga', 'fa cup', 'eredivisie', 'primeira liga', 'segunda liga'
+  ]},
+  { category: 'Movies', patterns: ['movie', 'movies', 'cinema', 'film', 'films', 'hbo', 'showtime', 'cinemax', 'cinestar', 'kino'] },
+  { category: 'News', patterns: ['news', 'cnn', 'bbc', 'al jazeera', 'cnbc', 'bloomberg', 'msnbc', 'fox news', 'euronews', 'france 24', 'dw', 'rai news', 'rtl', 'channel 4 news'] },
+  { category: 'Kids', patterns: ['kids', 'kid', 'cartoon', 'cartoons', 'cartoon network', 'cartoonito', 'disney', 'disney junior', 'disney xd', 'nick', 'nick jr', 'nickelodeon', 'boomerang', 'baby tv', 'duck tv'] },
   { category: 'Music', patterns: ['music', 'mtv', 'vh1', 'radio'] },
-  { category: 'Documentary', patterns: ['documentary', 'history', 'nature', 'science'] },
+  { category: 'Documentary', patterns: ['documentary', 'history', 'nature', 'science', 'discovery', 'national geographic', 'nat geo', 'docubox'] },
   { category: 'Lifestyle', patterns: ['lifestyle', 'travel', 'food', 'cooking', 'home', 'fashion'] },
   { category: 'Faith', patterns: ['faith', 'christian', 'worship', 'gospel', 'religious'] },
   { category: 'Adult', patterns: ['adult', 'xxx', 'porn', 'erotic'] },
