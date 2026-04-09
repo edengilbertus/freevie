@@ -5,7 +5,7 @@ const ADULT_KEYWORD_REGEX = /\b(adult|xxx|18\+|porn|sex|erotic)\b/i;
 const QUALITY_REGEX = /\b(2160p|4k|uhd|1080p|fhd|720p|hd|480p|sd|360p|240p)\b/ig;
 const ADULT_LABEL_REGEX = /\b(adult|xxx|porn|sex|erotic)\b/ig;
 const DISPLAY_NAME_NOISE_REGEX = /\b(?:geo(?:\s|-)?blocked|backup(?:\s*feed)?|feed|test(?:ing)?|not\s*24\/7|24\/7|hevc|h\.?265|h\.?264|hdr|vip|server\s*\d+|multi(?:ple)?\s*audio|audio)\b/ig;
-const TRAILING_REGION_REGEX = /\b(?:us|usa|uk|gb|ca|canada|ug|uganda|ke|kenya|ng|nigeria|za|africa|south\s+africa)\b$/i;
+const TRAILING_REGION_REGEX = /\b(?:us|usa|uk|gb|ca|canada)\b$/i;
 
 function collapseWhitespace(value) {
   return String(value || '')
