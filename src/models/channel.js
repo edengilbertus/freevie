@@ -5,6 +5,7 @@ function createChannelRecord(data) {
     sourceType: data.sourceType || 'm3u',
     tvgId: data.tvgId || null,
     name: data.name,
+    displayName: data.displayName || data.name,
     normalizedName: data.normalizedName,
     canonicalId: data.canonicalId,
     url: data.url,

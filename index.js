@@ -351,11 +351,11 @@ function channelToMeta(ch) {
   return {
     id: `freevie:${ch.id}`,
     type: 'tv',
-    name: ch.name,
+    name: ch.displayName || ch.name,
     poster: ch.poster || ch.logo || undefined,
     logo: ch.logo || ch.poster || undefined,
     posterShape: 'square',
-    description: `Live TV: ${ch.name}${qualityBadge} — ${regionLabel}`,
+    description: `Live TV: ${ch.displayName || ch.name}${qualityBadge} — ${regionLabel}`,
     genres,
     links: [],
     background: ch.poster || ch.logo || undefined
@@ -383,7 +383,7 @@ function channelToStream(ch) {
   const stream = {
     url: streamUrl,
     name: `${qualityLabel}${speedLabel}${relayLabel}${fallbackLabel}`,
-    description: `${ch.name} — ${countryLabel}`,
+    description: `${ch.displayName || ch.name} — ${countryLabel}`,
     behaviorHints: {
       notWebReady: true,
       bingeGroup: 'freevie-live'

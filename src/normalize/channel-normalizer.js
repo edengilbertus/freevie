@@ -4,6 +4,8 @@ const { enrichChannelCategory } = require('./channel-ranking');
 const ADULT_KEYWORD_REGEX = /\b(adult|xxx|18\+|porn|sex|erotic)\b/i;
 const QUALITY_REGEX = /\b(2160p|4k|uhd|1080p|fhd|720p|hd|480p|sd|360p|240p)\b/ig;
 const ADULT_LABEL_REGEX = /\b(adult|xxx|porn|sex|erotic)\b/ig;
+const DISPLAY_NAME_NOISE_REGEX = /\b(?:geo(?:\s|-)?blocked|backup(?:\s*feed)?|feed|test(?:ing)?|not\s*24\/7|24\/7|hevc|h\.?265|h\.?264|hdr|vip|server\s*\d+|multi(?:ple)?\s*audio|audio)\b/ig;
+const TRAILING_REGION_REGEX = /\b(?:us|usa|uk|gb|ca|canada|ug|uganda|ke|kenya|ng|nigeria|za|africa|south\s+africa)\b$/i;
 
 function collapseWhitespace(value) {
   return String(value || '')
@@ -44,12 +46,34 @@ function normalizeGroups(groups, fallbackGroup) {
 }
 
 function normalizeChannelName(name) {
-  const cleaned = collapseWhitespace(name)
+  const cleaned = cleanChannelDisplayName(name)
     .replace(QUALITY_REGEX, ' ')
     .replace(ADULT_LABEL_REGEX, ' ')
     .replace(/[^\p{L}\p{N}]+/gu, ' ');
 
   return collapseWhitespace(cleaned).toLowerCase();
+}
+
+function cleanChannelDisplayName(name) {
+  const raw = collapseWhitespace(name);
+  let cleaned = raw
+    .replace(/\[[^\]]*]/g, ' ')
+    .replace(/\([^)]*]/g, ' ')
+    .replace(QUALITY_REGEX, ' ')
+    .replace(DISPLAY_NAME_NOISE_REGEX, ' ')
+    .replace(/[_|]+/g, ' ')
+    .replace(/\s*[-–:]\s*/g, ' ')
+    .replace(/[^\p{L}\p{N}.&+]+/gu, ' ');
+
+  let previous;
+  do {
+    previous = cleaned;
+    cleaned = cleaned.replace(TRAILING_REGION_REGEX, ' ');
+    cleaned = collapseWhitespace(cleaned);
+  } while (cleaned !== previous);
+
+  cleaned = collapseWhitespace(cleaned);
+  return cleaned || raw;
 }
 
 function sanitizeExternalId(tvgId) {
@@ -71,6 +95,7 @@ function deriveRuntimeId(sourceId, tvgId, canonicalId) {
 
 function normalizeChannel(input) {
   const rawName = collapseWhitespace(input.name || input.tvgName || 'Unknown');
+  const displayName = cleanChannelDisplayName(rawName);
   const quality = input.quality || detectQuality(rawName);
   const normalizedName = normalizeChannelName(rawName);
   const isAdult = input.isAdult === true || ADULT_KEYWORD_REGEX.test(`${rawName} ${String(input.groups || '')}`);
@@ -84,6 +109,7 @@ function normalizeChannel(input) {
     sourceType: input.sourceType || 'm3u',
     tvgId: input.tvgId || null,
     name: rawName,
+    displayName,
     normalizedName,
     canonicalId,
     url: input.url,
@@ -105,6 +131,7 @@ function normalizeChannel(input) {
 
 module.exports = {
   ADULT_KEYWORD_REGEX,
+  cleanChannelDisplayName,
   detectQuality,
   normalizeChannel,
   normalizeChannelName

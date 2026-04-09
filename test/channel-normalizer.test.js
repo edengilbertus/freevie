@@ -57,3 +57,18 @@ test('normalizeChannel upgrades noisy movie groups into curated primary categori
   assert.equal(channel.primaryGroup, 'Movies');
   assert.deepEqual(channel.groups, ['Movies', '24/7 Movies', 'Cinema']);
 });
+
+test('normalizeChannel derives a clean display name from noisy playlist titles', () => {
+  const channel = normalizeChannel({
+    sourceId: 'gb',
+    sourceType: 'm3u',
+    name: 'BBC News UK 1080p Geo-Blocked Backup Feed',
+    url: 'https://example.com/live/bbc-news.m3u8',
+    groups: ['News'],
+    country: 'gb'
+  });
+
+  assert.equal(channel.name, 'BBC News UK 1080p Geo-Blocked Backup Feed');
+  assert.equal(channel.displayName, 'BBC News');
+  assert.equal(channel.normalizedName, 'bbc news');
+});

@@ -9,7 +9,8 @@ function matchesGenre(channel, genre) {
 function matchesSearch(channel, search) {
   if (!search) return true;
   const query = String(search).toLowerCase();
-  return String(channel.name || '').toLowerCase().includes(query);
+  return [channel.displayName, channel.name]
+    .some((value) => String(value || '').toLowerCase().includes(query));
 }
 
 function buildCatalogPage(channels, options = {}) {
