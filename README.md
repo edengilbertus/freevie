@@ -15,6 +15,7 @@ An open-source Stremio addon that streams **live USA, Canada, and Uganda TV chan
 - **Browse by genre** — News, Sports, Kids, Entertainment, and 30+ categories
 - **Stream health check** — dead streams flagged automatically
 - **Alternative feeds** — multiple stream sources per channel when available
+- **Adult source failover** — supports multiple adult playlist URLs with merge + dedupe
 - **MediaFusion-style IPTV checks** — optional strict content-type validation for live streams
 - **Configurable health filtering** — hide unhealthy channels in catalogs when enabled
 - **Request header forwarding** — stream-level proxy headers preserved in behavior hints
@@ -112,7 +113,8 @@ Then install: `http://localhost:7000/manifest.json`
 | `US_M3U_URL` | iptv-org US | Custom M3U source for US channels |
 | `CA_M3U_URL` | iptv-org CA | Custom M3U source for CA channels |
 | `UG_M3U_URL` | iptv-org UG | Custom M3U source for Uganda channels |
-| `ADULT_M3U_URL` | iptvmate XXX | Custom M3U source for adult channels |
+| `ADULT_M3U_URLS` | `https://raw.githubusercontent.com/sacuar/MyIPTV/main/Play1.m3u,https://iptvmate.net/files/adult.m3u` | Comma-separated adult playlist URLs (primary + fallbacks). |
+| `ADULT_M3U_URL` | *(legacy)* | Legacy single adult source, only used when `ADULT_M3U_URLS` is not set. |
 
 ---
 

@@ -18,6 +18,8 @@ services:
         value: "false"
       - key: ENABLE_ADULT
         value: "true"
+      - key: ADULT_M3U_URLS
+        value: "https://raw.githubusercontent.com/sacuar/MyIPTV/main/Play1.m3u,https://iptvmate.net/files/adult.m3u"
       - key: ADULT_M3U_URL
         value: "https://iptvmate.net/files/xxx.m3u"
       - key: UG_M3U_URL

@@ -14,6 +14,15 @@ function envInt(name, defaultValue) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
 }
 
+function parseUrlList(rawValue) {
+  if (!rawValue) return [];
+  const urls = String(rawValue)
+    .split(',')
+    .map(part => part.trim())
+    .filter(part => /^https?:\/\//i.test(part));
+  return [...new Set(urls)];
+}
+
 // ─── Persistent HTTP agents (keep-alive connection pooling) ───────────────────
 // Reuse TCP connections to CDNs instead of a new handshake per segment.
 // Each connection saved = ~50-200ms latency cut per segment request.
@@ -26,7 +35,17 @@ const CACHE_TTL = envInt('CACHE_TTL', 60 * 60 * 1000); // 1 hour
 const US_M3U_URL = process.env.US_M3U_URL || 'https://iptv-org.github.io/iptv/countries/us.m3u';
 const CA_M3U_URL = process.env.CA_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ca.m3u';
 const UG_M3U_URL = process.env.UG_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ug.m3u';
-const ADULT_M3U_URL = process.env.ADULT_M3U_URL || 'https://iptvmate.net/files/xxx.m3u';
+const LEGACY_ADULT_M3U_URL = process.env.ADULT_M3U_URL ? process.env.ADULT_M3U_URL.trim() : '';
+const DEFAULT_ADULT_M3U_URLS = [
+  'https://raw.githubusercontent.com/sacuar/MyIPTV/main/Play1.m3u',
+  'https://iptvmate.net/files/adult.m3u'
+];
+const ADULT_M3U_URLS = (() => {
+  const configuredList = parseUrlList(process.env.ADULT_M3U_URLS);
+  if (configuredList.length > 0) return configuredList;
+  if (/^https?:\/\//i.test(LEGACY_ADULT_M3U_URL)) return [LEGACY_ADULT_M3U_URL];
+  return DEFAULT_ADULT_M3U_URLS;
+})();
 const ENABLE_ADULT = envFlag('ENABLE_ADULT', true);
 const HEALTH_FILTER = envFlag('HEALTH_FILTER', true);
 const STRICT_IPTV_VALIDATION = envFlag('STRICT_IPTV_VALIDATION', false);
@@ -58,6 +77,18 @@ function looksLikeLiveStream(url) {
 function isAdultLikeChannel(name, groups) {
   const haystack = `${name || ''} ${(groups || []).join(' ')}`;
   return ADULT_KEYWORD_REGEX.test(haystack);
+}
+
+function dedupeChannels(channels) {
+  const deduped = [];
+  const seen = new Set();
+  for (const channel of channels) {
+    const key = `${channel.id}:${channel.url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(channel);
+  }
+  return deduped;
 }
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
@@ -231,25 +262,35 @@ async function refreshChannels() {
   log('Fetching fresh channel lists...');
 
   try {
-    // Fetch US + CA + UG with keep-alive agents, adult with retry when enabled
-    const fetchAdult = async () => {
-      if (!ENABLE_ADULT) return null;
+    // Fetch US + CA + UG with keep-alive agents, plus one or more adult sources.
+    const fetchAdultSource = async (url) => {
       try {
-        const r = await axios.get(ADULT_M3U_URL, { timeout: 20000, httpAgent, httpsAgent });
-        return r;
-      } catch (e) {
-        log(`Adult fetch attempt 1 failed (${e.message}), retrying...`);
+        const response = await axios.get(url, { timeout: 20000, httpAgent, httpsAgent });
+        const parsed = parseM3U(response.data, 'adult');
+        log(`Adult source loaded: ${url} (${parsed.length} channels)`);
+        return parsed;
+      } catch (firstErr) {
+        log(`Adult source attempt 1 failed (${url}): ${firstErr.message}, retrying...`);
         try {
-          const r = await axios.get(ADULT_M3U_URL, { timeout: 25000 });
-          return r;
-        } catch (e2) {
-          log(`Adult fetch attempt 2 failed (${e2.message}) — status: ${e2.response?.status || 'no response'} — adult channels will be empty`);
-          return null;
+          const response = await axios.get(url, { timeout: 25000, httpAgent, httpsAgent });
+          const parsed = parseM3U(response.data, 'adult');
+          log(`Adult source loaded on retry: ${url} (${parsed.length} channels)`);
+          return parsed;
+        } catch (secondErr) {
+          log(`Adult source failed (${url}) — ${secondErr.message} — status: ${secondErr.response?.status || 'no response'}`);
+          return [];
         }
       }
     };
 
-    const [usRes, caRes, ugRes, adultRes] = await Promise.all([
+    const fetchAdult = async () => {
+      if (!ENABLE_ADULT) return [];
+      const sourceResults = await Promise.all(ADULT_M3U_URLS.map(fetchAdultSource));
+      const merged = dedupeChannels(sourceResults.flat());
+      return merged;
+    };
+
+    const [usRes, caRes, ugRes, fetchedAdultChannels] = await Promise.all([
       axios.get(US_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
       axios.get(CA_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
       axios.get(UG_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
@@ -259,7 +300,7 @@ async function refreshChannels() {
     usChannels = parseM3U(usRes.data, 'us');
     caChannels = parseM3U(caRes.data, 'ca');
     ugChannels = parseM3U(ugRes.data, 'ug');
-    adultChannels = adultRes ? parseM3U(adultRes.data, 'adult') : [];
+    adultChannels = fetchedAdultChannels;
 
     // Apply adult filtering across all catalogs when disabled.
     if (!ENABLE_ADULT) {
@@ -278,7 +319,7 @@ async function refreshChannels() {
 
     lastFetch = now;
     log(`Loaded ${usChannels.length} US + ${caChannels.length} CA + ${ugChannels.length} UG + ${adultChannels.length} Adult = ${allChannels.length} total channels`);
-    log(`Health filter=${HEALTH_FILTER} strictValidation=${STRICT_IPTV_VALIDATION} adult=${ENABLE_ADULT}`);
+    log(`Health filter=${HEALTH_FILTER} strictValidation=${STRICT_IPTV_VALIDATION} adult=${ENABLE_ADULT} adultSources=${ADULT_M3U_URLS.length}`);
     log(`Found ${allGenres.length} genres: ${allGenres.slice(0, 15).join(', ')}...`);
 
     // Run async health check on all channels.
