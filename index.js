@@ -559,11 +559,61 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     }
   });
 
-  return { metas: page.map(channelToMeta) };
+  const baseMetas = page.map(channelToMeta);
+
+  // VAVOO INTEGRATION: Fetch and merge TvVoo channels into relevant catalogs
+  if (['freevie_sports', 'freevie_eu', 'freevie_uk', 'freevie_all'].includes(id)) {
+    try {
+      let tvvooCatalog = '';
+      if (id === 'freevie_uk') tvvooCatalog = 'tvvoo-uk';
+      if (id === 'freevie_eu') tvvooCatalog = 'tvvoo-de'; // DE has massive Euro sport coverage
+      if (id === 'freevie_sports' || id === 'freevie_all') tvvooCatalog = 'tvvoo-uk'; // We merge UK bundle which has massive sports
+
+      const skip = extra?.skip ? `&skip=${extra.skip}` : '';
+      const search = extra?.search ? `&search=${encodeURIComponent(extra.search)}` : '';
+      const tvvooUrl = `http://127.0.0.1:7019/catalog/tv/${tvvooCatalog}.json?${skip}${search}`;
+
+      const { default: axios } = await import('axios');
+      const resp = await axios.get(tvvooUrl, { timeout: 3000 });
+      if (resp.data && resp.data.metas) {
+        // Map TvVoo metas to pass through Freevie safely
+        const tvvooMetas = resp.data.metas.map(meta => {
+          meta.id = `tvvoo|${meta.id}`;
+          meta.description = `VAVOO ${meta.description ? `— ${meta.description}` : ''}`;
+          if (!meta.genres) meta.genres = [];
+          meta.genres.push('VAVOO');
+          return meta;
+        });
+        
+        // Append TvVoo matches (interleaving logic can be refined, just putting them first here is great for Sports)
+        baseMetas.unshift(...tvvooMetas);
+      }
+    } catch (e) {
+      console.log(`[TvVoo] Integration skipped or failed: ${e.message}`);
+    }
+  }
+
+  return { metas: baseMetas };
 });
 
 builder.defineMetaHandler(async ({ type, id }) => {
-  if (type !== 'tv' || !id.startsWith('freevie:')) return { meta: null };
+  if (type !== 'tv') return { meta: null };
+
+  if (id.startsWith('tvvoo|')) {
+    const rawId = id.replace('tvvoo|', '');
+    try {
+      const { default: axios } = await import('axios');
+      const resp = await axios.get(`http://127.0.0.1:7019/meta/tv/${rawId}.json`, { timeout: 3000 });
+      if (resp.data && resp.data.meta) {
+        const meta = resp.data.meta;
+        meta.id = `tvvoo|${meta.id}`;
+        return { meta };
+      }
+    } catch (e) {}
+    return { meta: null };
+  }
+
+  if (!id.startsWith('freevie:')) return { meta: null };
 
   await refreshChannels();
 
@@ -575,7 +625,23 @@ builder.defineMetaHandler(async ({ type, id }) => {
 });
 
 builder.defineStreamHandler(async ({ type, id }) => {
-  if (type !== 'tv' || !id.startsWith('freevie:')) return { streams: [] };
+  if (type !== 'tv') return { streams: [] };
+
+  if (id.startsWith('tvvoo|')) {
+    const rawId = id.replace('tvvoo|', '');
+    try {
+      const { default: axios } = await import('axios');
+      const resp = await axios.get(`http://127.0.0.1:7019/stream/tv/${rawId}.json`, { timeout: 5000 });
+      if (resp.data && resp.data.streams) {
+        return { streams: resp.data.streams };
+      }
+    } catch (e) {
+      console.log(`[TvVoo] Stream resolve failed: ${e.message}`);
+    }
+    return { streams: [] };
+  }
+
+  if (!id.startsWith('freevie:')) return { streams: [] };
 
   await refreshChannels();
 
