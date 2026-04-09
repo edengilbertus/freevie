@@ -20,8 +20,8 @@ const {
 } = require('./src/config');
 const { log } = require('./src/log');
 const { runtimeState, cacheConfig, syncRuntimeState } = require('./src/state');
-
-const ADULT_KEYWORD_REGEX = /\b(adult|xxx|18\+|porn|sex|erotic)\b/i;
+const { parseM3USource } = require('./src/sources/m3u');
+const { findAlternativeChannels } = require('./src/normalize/channel-matching');
 const { SEGMENT_CACHE_TTL, PREFETCH_COUNT, PLAYLIST_CACHE_TTL, MAX_CONCURRENT_PREFETCHES, HEALTH_BATCH_SIZE } = cacheConfig;
 const { segmentCache, playlistCache } = runtimeState;
 let {
@@ -47,11 +47,6 @@ function looksLikeLiveStream(url) {
   return /\.(m3u8|ts|mpd)(\?|$)/i.test(url || '');
 }
 
-function isAdultLikeChannel(name, groups) {
-  const haystack = `${name || ''} ${(groups || []).join(' ')}`;
-  return ADULT_KEYWORD_REGEX.test(haystack);
-}
-
 function dedupeChannels(channels) {
   const deduped = [];
   const seen = new Set();
@@ -62,88 +57,6 @@ function dedupeChannels(channels) {
     deduped.push(channel);
   }
   return deduped;
-}
-
-// ─── M3U Parser ───────────────────────────────────────────────────────────────
-function detectQuality(name) {
-  if (/2160p|4k|uhd/i.test(name)) return '4K';
-  if (/1080p|fhd/i.test(name)) return 'FHD';
-  if (/720p|hd/i.test(name)) return 'HD';
-  if (/480p|sd/i.test(name)) return 'SD';
-  if (/360p/i.test(name)) return '360p';
-  if (/240p/i.test(name)) return '240p';
-  return null;
-}
-
-function parseM3U(content, country) {
-  const channels = [];
-  const lines = content.split(/\r?\n/);
-  const seen = new Set();
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line.startsWith('#EXTINF')) continue;
-
-    // Check for VLC options on next lines, skip them to find URL
-    let urlLine = null;
-    let extraHeaders = {};
-    for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-      const nextLine = lines[j].trim();
-      if (nextLine.startsWith('#EXTVLCOPT:http-referrer=')) {
-        extraHeaders.referer = nextLine.replace('#EXTVLCOPT:http-referrer=', '');
-      } else if (nextLine.startsWith('#EXTVLCOPT:http-user-agent=')) {
-        extraHeaders['user-agent'] = nextLine.replace('#EXTVLCOPT:http-user-agent=', '');
-      } else if (nextLine.startsWith('http')) {
-        urlLine = nextLine;
-        break;
-      } else if (!nextLine.startsWith('#')) {
-        break; // Not a comment/option, and not a URL — stop
-      }
-    }
-
-    if (!urlLine) continue;
-    if (!/^https?:\/\//i.test(urlLine)) continue;
-
-    const nameMatch = line.match(/,(.+)$/);
-    const name = nameMatch ? nameMatch[1].trim() : 'Unknown';
-    if (!name || name === 'Unknown') continue;
-
-    const idMatch = line.match(/tvg-id="([^"]+)"/);
-    const rawId = idMatch ? idMatch[1] : name;
-    const id = rawId.toLowerCase().replace(/[^a-z0-9]/g, '_');
-
-    const logoMatch = line.match(/tvg-logo="([^"]+)"/);
-    const logo = logoMatch ? logoMatch[1] : '';
-
-    const groupMatch = line.match(/group-title="([^"]+)"/);
-    const groupRaw = groupMatch ? groupMatch[1] : 'General';
-    const groups = groupRaw.split(/[,;|]/).map(g => g.trim()).filter(Boolean);
-
-    const quality = detectQuality(name);
-
-    const dedupeKey = `${country}_${id}:${urlLine}`;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-
-    channels.push({
-      id: `${country}_${id}`,
-      name,
-      url: urlLine,
-      logo,
-      groups,
-      primaryGroup: groups[0] || 'General',
-      country,
-      quality,
-      extraHeaders: Object.keys(extraHeaders).length > 0 ? extraHeaders : null,
-      healthy: true,
-      contentType: null,
-      lastHealthAt: null,
-      lastHealthError: null,
-      isAdult: country === 'adult' || isAdultLikeChannel(name, groups)
-    });
-  }
-
-  return channels;
 }
 
 setInterval(() => {
@@ -202,14 +115,14 @@ async function refreshChannels() {
     const fetchAdultSource = async (url) => {
       try {
         const response = await axios.get(url, { timeout: 20000, httpAgent, httpsAgent });
-        const parsed = parseM3U(response.data, 'adult');
+        const parsed = parseM3USource({ content: response.data, sourceId: 'adult', country: 'adult' });
         log(`Adult source loaded: ${url} (${parsed.length} channels)`);
         return parsed;
       } catch (firstErr) {
         log(`Adult source attempt 1 failed (${url}): ${firstErr.message}, retrying...`);
         try {
           const response = await axios.get(url, { timeout: 25000, httpAgent, httpsAgent });
-          const parsed = parseM3U(response.data, 'adult');
+          const parsed = parseM3USource({ content: response.data, sourceId: 'adult', country: 'adult' });
           log(`Adult source loaded on retry: ${url} (${parsed.length} channels)`);
           return parsed;
         } catch (secondErr) {
@@ -233,9 +146,9 @@ async function refreshChannels() {
       fetchAdult()
     ]);
 
-    usChannels = parseM3U(usRes.data, 'us');
-    caChannels = parseM3U(caRes.data, 'ca');
-    ugChannels = parseM3U(ugRes.data, 'ug');
+    usChannels = parseM3USource({ content: usRes.data, sourceId: 'us', country: 'us' });
+    caChannels = parseM3USource({ content: caRes.data, sourceId: 'ca', country: 'ca' });
+    ugChannels = parseM3USource({ content: ugRes.data, sourceId: 'ug', country: 'ug' });
     adultChannels = fetchedAdultChannels;
 
     if (!ENABLE_ADULT) {
@@ -369,13 +282,13 @@ function channelToMeta(ch) {
     id: `freevie:${ch.id}`,
     type: 'tv',
     name: ch.name,
-    poster: ch.logo || undefined,
-    logo: ch.logo || undefined,
+    poster: ch.poster || ch.logo || undefined,
+    logo: ch.logo || ch.poster || undefined,
     posterShape: 'square',
     description: `Live TV: ${ch.name}${qualityBadge} — ${countryFlag}`,
     genres: [ch.primaryGroup, countryFlag],
     links: [],
-    background: ch.logo || undefined
+    background: ch.poster || ch.logo || undefined
   };
 }
 
@@ -544,11 +457,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
   const ch = allChannels.find(c => c.id === channelId);
   if (!ch) return { streams: [] };
 
-  const baseName = ch.name.replace(/\s*\(.*?\)\s*/g, '').trim().toLowerCase();
-  const alternatives = allChannels.filter(alt => {
-    const altBase = alt.name.replace(/\s*\(.*?\)\s*/g, '').trim().toLowerCase();
-    return altBase === baseName && alt.id !== ch.id;
-  });
+  const alternatives = findAlternativeChannels(ch, allChannels);
 
   const QUALITY_SCORE = { 'SD': 0, '360p': 1, '240p': 2, 'HD': 3, 'FHD': 4, '4K': 5 };
 
