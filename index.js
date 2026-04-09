@@ -565,9 +565,9 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   if (['freevie_sports', 'freevie_eu', 'freevie_uk', 'freevie_all'].includes(id)) {
     try {
       let tvvooCatalog = '';
-      if (id === 'freevie_uk') tvvooCatalog = 'tvvoo-uk';
-      if (id === 'freevie_eu') tvvooCatalog = 'tvvoo-de'; // DE has massive Euro sport coverage
-      if (id === 'freevie_sports' || id === 'freevie_all') tvvooCatalog = 'tvvoo-uk'; // We merge UK bundle which has massive sports
+      if (id === 'freevie_uk') tvvooCatalog = 'vavoo_tv_uk';
+      if (id === 'freevie_eu') tvvooCatalog = 'vavoo_tv_de'; // DE has massive Euro sport coverage
+      if (id === 'freevie_sports' || id === 'freevie_all') tvvooCatalog = 'vavoo_tv_uk'; // We merge UK bundle which has massive sports
 
       const skip = extra?.skip ? `&skip=${extra.skip}` : '';
       const search = extra?.search ? `&search=${encodeURIComponent(extra.search)}` : '';
