@@ -566,13 +566,18 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   if (['freevie_sports', 'freevie_eu', 'freevie_uk'].includes(id)) {
     try {
       let tvvooCatalog = '';
+      let tvvooGenreStr = '';
       if (id === 'freevie_uk') tvvooCatalog = 'vavoo_tv_uk';
       if (id === 'freevie_eu') tvvooCatalog = 'vavoo_tv_de'; // DE has massive Euro sport coverage
-      if (id === 'freevie_sports') tvvooCatalog = 'vavoo_tv_uk'; // We merge UK bundle which has massive sports
+      if (id === 'freevie_sports') {
+        tvvooCatalog = 'vavoo_tv_uk'; // We merge UK bundle which has massive sports
+        tvvooGenreStr = '/genre=Sport'; // Filter purely for Sports!
+      }
 
-      const skip = extra?.skip ? `&skip=${extra.skip}` : '';
-      const search = extra?.search ? `&search=${encodeURIComponent(extra.search)}` : '';
-      const tvvooUrl = `http://127.0.0.1:7019/catalog/tv/${tvvooCatalog}.json?${skip}${search}`;
+      const skip = extra?.skip ? `skip=${extra.skip}` : '';
+      const search = extra?.search ? `search=${encodeURIComponent(extra.search)}` : '';
+      const q = [skip, search].filter(Boolean).join('&');
+      const tvvooUrl = `http://127.0.0.1:7019/catalog/tv/${tvvooCatalog}${tvvooGenreStr}.json${q ? '?' + q : ''}`;
 
       const { default: axios } = await import('axios');
       const resp = await axios.get(tvvooUrl, { timeout: 3000 });
@@ -582,6 +587,9 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
           meta.id = `tvvoo|${meta.id}`;
           meta.description = `VAVOO ${meta.description ? `— ${meta.description}` : ''}`;
           if (!meta.genres) meta.genres = [];
+          if (id === 'freevie_sports' && !meta.genres.includes('Sports')) {
+             meta.genres.push('Sports');
+          }
           meta.genres.push('VAVOO');
           return meta;
         });
