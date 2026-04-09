@@ -13,10 +13,10 @@ const CATEGORY_PRIORITY = [
 ];
 
 const CATEGORY_RULES = [
-  { category: 'Sports', patterns: ['sports', 'sport', 'football', 'soccer', 'nba', 'nfl', 'mlb', 'ufc', 'boxing', 'fight', 'cricket', 'tennis', 'golf', 'motorsport', 'formula', 'espn', 'bein'] },
+  { category: 'Sports', patterns: ['sports', 'sport', 'football', 'soccer', 'nba', 'nfl', 'mlb', 'ufc', 'boxing', 'fight', 'cricket', 'tennis', 'golf', 'motorsport', 'formula', 'espn', 'bein', 'supersport', 'sky sports', 'tnt sports', 'bt sport', 'premier sports', 'eurosport', 'dazn'] },
   { category: 'Movies', patterns: ['movie', 'movies', 'cinema', 'film', 'films', 'hbo', 'showtime'] },
   { category: 'News', patterns: ['news', 'cnn', 'bbc', 'al jazeera', 'cnbc', 'bloomberg', 'msnbc', 'fox news'] },
-  { category: 'Kids', patterns: ['kids', 'kid', 'cartoon', 'cartoons', 'disney', 'nick', 'boomerang'] },
+  { category: 'Kids', patterns: ['kids', 'kid', 'cartoon', 'cartoons', 'cartoon network', 'cartoonito', 'disney', 'disney junior', 'disney xd', 'nick', 'nick jr', 'nickelodeon', 'boomerang'] },
   { category: 'Music', patterns: ['music', 'mtv', 'vh1', 'radio'] },
   { category: 'Documentary', patterns: ['documentary', 'history', 'nature', 'science'] },
   { category: 'Lifestyle', patterns: ['lifestyle', 'travel', 'food', 'cooking', 'home', 'fashion'] },
@@ -27,6 +27,38 @@ const CATEGORY_RULES = [
 
 const GENERIC_NAME_PATTERNS = ['feed', 'backup', 'test', 'trial', 'channel', 'tv'];
 const QUALITY_SCORES = { SD: 6, '360p': 4, '240p': 2, HD: 15, FHD: 18, '4K': 20 };
+const SPORTS_BRAND_PATTERNS = [
+  'supersport',
+  'super sport',
+  'bein sports',
+  'beinsports',
+  'sky sports',
+  'tnt sports',
+  'bt sport',
+  'bt sports',
+  'premier sports',
+  'eurosport',
+  'dazn',
+  'espn'
+];
+const KIDS_BRAND_PATTERNS = [
+  'disney channel',
+  'disney junior',
+  'disney xd',
+  'cartoon network',
+  'cartoonito',
+  'boomerang',
+  'nickelodeon',
+  'nick jr',
+  'nicktoons'
+];
+const FOOTBALL_COMPETITION_PATTERNS = [
+  'premier league',
+  'fa cup',
+  'champions league',
+  'europa league',
+  'conference league'
+];
 
 function normalizeHaystack(value) {
   return String(value || '')
@@ -78,9 +110,12 @@ function enrichChannelCategory(channel) {
 
 function scoreChannel(channel, context = {}) {
   let score = 0;
-  const normalizedName = normalizeHaystack(channel.normalizedName || channel.name);
+  const normalizedName = normalizeHaystack(channel.normalizedName || channel.displayName || channel.name);
   const category = channel.primaryGroup || categorizeChannel(channel);
   const targetGenre = normalizeHaystack(context.genre);
+  const sportsBrandMatch = SPORTS_BRAND_PATTERNS.some((pattern) => normalizedName.includes(pattern));
+  const kidsBrandMatch = KIDS_BRAND_PATTERNS.some((pattern) => normalizedName.includes(pattern));
+  const footballCompetitionMatch = FOOTBALL_COMPETITION_PATTERNS.some((pattern) => normalizedName.includes(pattern));
 
   if (channel.healthy !== false) score += 40;
   if (channel.poster || channel.logo) score += 28;
@@ -94,6 +129,13 @@ function scoreChannel(channel, context = {}) {
 
   if (category === 'Sports') score += 18;
   if (targetGenre && category.toLowerCase() === targetGenre) score += 26;
+  if (sportsBrandMatch) score += 28;
+  if (kidsBrandMatch) score += 22;
+  if (footballCompetitionMatch) score += 12;
+  if (targetGenre === 'sports' && sportsBrandMatch) score += 42;
+  if (targetGenre === 'kids' && kidsBrandMatch) score += 34;
+  if (context.catalogId === 'freevie_all' && sportsBrandMatch) score += 18;
+  if (context.catalogId === 'freevie_all' && kidsBrandMatch) score += 12;
 
   if (GENERIC_NAME_PATTERNS.some((token) => normalizedName.includes(token))) score -= 12;
   if ((channel.groups || []).length > 1) score += 6;

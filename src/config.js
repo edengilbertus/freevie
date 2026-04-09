@@ -31,6 +31,12 @@ const CA_M3U_URL = process.env.CA_M3U_URL || 'https://iptv-org.github.io/iptv/co
 const UG_M3U_URL = process.env.UG_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ug.m3u';
 const DEFAULT_EXTRA_M3U_URLS = [
   'https://iptv-org.github.io/iptv/countries/gb.m3u',
+  'https://iptv-org.github.io/iptv/countries/ie.m3u',
+  'https://iptv-org.github.io/iptv/countries/qa.m3u',
+  'https://iptv-org.github.io/iptv/countries/ae.m3u',
+  'https://iptv-org.github.io/iptv/countries/sa.m3u',
+  'https://iptv-org.github.io/iptv/countries/fr.m3u',
+  'https://iptv-org.github.io/iptv/countries/es.m3u',
   'https://iptv-org.github.io/iptv/countries/ke.m3u',
   'https://iptv-org.github.io/iptv/countries/ng.m3u',
   'https://iptv-org.github.io/iptv/countries/za.m3u'

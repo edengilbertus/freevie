@@ -42,4 +42,8 @@ test('config falls back to default extra m3u urls when unset', () => {
 
   assert.ok(Array.isArray(config.EXTRA_M3U_URLS));
   assert.ok(config.EXTRA_M3U_URLS.length >= 1);
+  assert.ok(config.EXTRA_M3U_URLS.some((url) => url.includes('/gb.m3u')));
+  assert.ok(config.EXTRA_M3U_URLS.some((url) => url.includes('/za.m3u')));
+  assert.ok(config.EXTRA_M3U_URLS.some((url) => url.includes('/qa.m3u')));
+  assert.ok(config.EXTRA_M3U_URLS.some((url) => url.includes('/ae.m3u')));
 });

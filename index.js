@@ -96,6 +96,12 @@ function formatRegionLabel(country) {
     .join(' ');
 }
 
+function inferCountryCodeFromPlaylistUrl(url) {
+  const match = String(url || '').match(/\/countries\/([a-z]{2})\.m3u/i);
+  if (match) return match[1].toLowerCase();
+  return 'global';
+}
+
 async function fetchM3USource({ url, sourceId, country, label }) {
   const attempts = [
     { timeout: 15000, retryLabel: 'attempt 1' },
@@ -201,9 +207,9 @@ async function refreshChannels() {
 
     const extraSourceConfigs = EXTRA_M3U_URLS.map((url, index) => ({
       url,
-      sourceId: `extra_${index + 1}`,
-      country: 'global',
-      label: `Extra ${index + 1}`
+      sourceId: `extra_${inferCountryCodeFromPlaylistUrl(url)}_${index + 1}`,
+      country: inferCountryCodeFromPlaylistUrl(url),
+      label: `Extra ${formatRegionLabel(inferCountryCodeFromPlaylistUrl(url))}`
     }));
 
     const [fetchedUsChannels, fetchedCaChannels, fetchedUgChannels, fetchedExtraChannels, fetchedAdultChannels] = await Promise.all([
