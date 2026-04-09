@@ -1,69 +1,42 @@
 const { addonBuilder } = require('stremio-addon-sdk');
 const axios = require('axios');
 const http = require('http');
-const https = require('https');
-
-function envFlag(name, defaultValue) {
-  const raw = process.env[name];
-  if (raw === undefined) return defaultValue;
-  return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
-}
-
-function envInt(name, defaultValue) {
-  const parsed = Number.parseInt(process.env[name], 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
-}
-
-function parseUrlList(rawValue) {
-  if (!rawValue) return [];
-  const urls = String(rawValue)
-    .split(',')
-    .map(part => part.trim())
-    .filter(part => /^https?:\/\//i.test(part));
-  return [...new Set(urls)];
-}
-
-// ─── Persistent HTTP agents (keep-alive connection pooling) ───────────────────
-// Reuse TCP connections to CDNs instead of a new handshake per segment.
-// Each connection saved = ~50-200ms latency cut per segment request.
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50, keepAliveMsecs: 3000 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, keepAliveMsecs: 3000 });
-
-// ─── Configuration ────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 7000;
-const CACHE_TTL = envInt('CACHE_TTL', 60 * 60 * 1000); // 1 hour
-const US_M3U_URL = process.env.US_M3U_URL || 'https://iptv-org.github.io/iptv/countries/us.m3u';
-const CA_M3U_URL = process.env.CA_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ca.m3u';
-const UG_M3U_URL = process.env.UG_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ug.m3u';
-const LEGACY_ADULT_M3U_URL = process.env.ADULT_M3U_URL ? process.env.ADULT_M3U_URL.trim() : '';
-const DEFAULT_ADULT_M3U_URLS = [
-  'https://raw.githubusercontent.com/sacuar/MyIPTV/main/Play1.m3u',
-  'https://iptvmate.net/files/adult.m3u'
-];
-const ADULT_M3U_URLS = (() => {
-  const configuredList = parseUrlList(process.env.ADULT_M3U_URLS);
-  if (configuredList.length > 0) return configuredList;
-  if (/^https?:\/\//i.test(LEGACY_ADULT_M3U_URL)) return [LEGACY_ADULT_M3U_URL];
-  return DEFAULT_ADULT_M3U_URLS;
-})();
-const ENABLE_ADULT = envFlag('ENABLE_ADULT', true);
-const HEALTH_FILTER = envFlag('HEALTH_FILTER', true);
-const STRICT_IPTV_VALIDATION = envFlag('STRICT_IPTV_VALIDATION', false);
-const HEALTH_CHECK_INTERVAL = envInt('HEALTH_CHECK_INTERVAL', 30 * 60 * 1000);
-// When set, all stream URLs are routed through this server as a relay proxy.
-// Example: PROXY_HOST=http://123.45.67.89:7000
-// Leave unset to serve original CDN URLs directly (local dev default).
-const PROXY_HOST = process.env.PROXY_HOST ? process.env.PROXY_HOST.replace(/\/$/, '') : null;
-
-const IPTV_VALID_CONTENT_TYPES = new Set([
-  'application/vnd.apple.mpegurl',
-  'application/x-mpegurl',
-  'video/mp2t',
-  'application/octet-stream',
-  'application/dash+xml'
-]);
+const {
+  httpAgent,
+  httpsAgent,
+  PORT,
+  CACHE_TTL,
+  US_M3U_URL,
+  CA_M3U_URL,
+  UG_M3U_URL,
+  ADULT_M3U_URLS,
+  ENABLE_ADULT,
+  HEALTH_FILTER,
+  STRICT_IPTV_VALIDATION,
+  HEALTH_CHECK_INTERVAL,
+  PROXY_HOST,
+  IPTV_VALID_CONTENT_TYPES,
+  PROXY_HEADERS
+} = require('./src/config');
+const { log } = require('./src/log');
+const { runtimeState, cacheConfig, syncRuntimeState } = require('./src/state');
 
 const ADULT_KEYWORD_REGEX = /\b(adult|xxx|18\+|porn|sex|erotic)\b/i;
+const { SEGMENT_CACHE_TTL, PREFETCH_COUNT, PLAYLIST_CACHE_TTL, MAX_CONCURRENT_PREFETCHES, HEALTH_BATCH_SIZE } = cacheConfig;
+const { segmentCache, playlistCache } = runtimeState;
+let {
+  usChannels,
+  caChannels,
+  ugChannels,
+  adultChannels,
+  allChannels,
+  allGenres,
+  lastFetch,
+  activePrefetches,
+  healthCheckDone,
+  healthCheckRunning,
+  lastHealthCheckAt
+} = runtimeState;
 
 function normalizeContentType(contentType) {
   if (!contentType) return '';
@@ -89,11 +62,6 @@ function dedupeChannels(channels) {
     deduped.push(channel);
   }
   return deduped;
-}
-
-// ─── Logging ──────────────────────────────────────────────────────────────────
-function log(msg) {
-  console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
 // ─── M3U Parser ───────────────────────────────────────────────────────────────
@@ -167,7 +135,7 @@ function parseM3U(content, country) {
       country,
       quality,
       extraHeaders: Object.keys(extraHeaders).length > 0 ? extraHeaders : null,
-      healthy: true, // assume healthy until checked
+      healthy: true,
       contentType: null,
       lastHealthAt: null,
       lastHealthError: null,
@@ -178,34 +146,6 @@ function parseM3U(content, country) {
   return channels;
 }
 
-// ─── Channel Store ────────────────────────────────────────────────────────────
-let usChannels = [];
-let caChannels = [];
-let ugChannels = [];
-let adultChannels = [];
-let allChannels = [];
-let allGenres = [];
-let lastFetch = 0;
-
-// ─── Segment Pre-fetch Cache ─────────────────────────────────────────────────
-// When a playlist is served, the next PREFETCH_COUNT segments are downloaded
-// immediately in the background. Cache hits are served from memory — zero CDN latency.
-const segmentCache = new Map(); // url -> { data: Buffer, contentType, fetchedAt }
-const SEGMENT_CACHE_TTL = 90 * 1000; // 90s — deeper buffer for live TV
-const PREFETCH_COUNT = 10;         // segments to pre-fetch ahead (~20-60s of video)
-
-// ─── Playlist Cache ───────────────────────────────────────────────────────────
-// Stremio polls the .m3u8 playlist every 2s. Cache the rewritten playlist for
-// 4s to cut CDN hits by ~50% with zero quality impact.
-const playlistCache = new Map(); // url -> { content, fetchedAt }
-const PLAYLIST_CACHE_TTL = 4 * 1000; // 4s
-
-// ─── Concurrent Prefetch Limiter ──────────────────────────────────────────────
-// Prevent CDN/server overload when multiple viewers are active simultaneously.
-const MAX_CONCURRENT_PREFETCHES = 6;
-let activePrefetches = 0;
-
-// Evict stale entries every 30 seconds
 setInterval(() => {
   const now = Date.now();
   let evicted = 0;
@@ -221,19 +161,13 @@ setInterval(() => {
   if (evicted > 0) log(`Segment cache: evicted ${evicted}, remaining ${segmentCache.size}`);
 }, 30 * 1000);
 
-const PROXY_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-  'Accept': '*/*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Connection': 'keep-alive'
-};
-
 async function prefetchSegments(urls, extraHeaders) {
   for (const url of urls) {
-    if (segmentCache.has(url)) continue; // already cached or in-flight
-    if (activePrefetches >= MAX_CONCURRENT_PREFETCHES) break; // don't overload CDN
-    segmentCache.set(url, null); // placeholder to prevent duplicate fetches
+    if (segmentCache.has(url)) continue;
+    if (activePrefetches >= MAX_CONCURRENT_PREFETCHES) break;
+    segmentCache.set(url, null);
     activePrefetches++;
+    runtimeState.activePrefetches = activePrefetches;
     axios.get(url, {
       responseType: 'arraybuffer',
       timeout: 10000,
@@ -249,7 +183,10 @@ async function prefetchSegments(urls, extraHeaders) {
     }).catch(err => {
       segmentCache.delete(url);
       log(`Prefetch miss ${url.slice(0, 70)}: ${err.message}`);
-    }).finally(() => { activePrefetches--; });
+    }).finally(() => {
+      activePrefetches--;
+      runtimeState.activePrefetches = activePrefetches;
+    });
   }
 }
 
@@ -262,7 +199,6 @@ async function refreshChannels() {
   log('Fetching fresh channel lists...');
 
   try {
-    // Fetch US + CA + UG with keep-alive agents, plus one or more adult sources.
     const fetchAdultSource = async (url) => {
       try {
         const response = await axios.get(url, { timeout: 20000, httpAgent, httpsAgent });
@@ -302,7 +238,6 @@ async function refreshChannels() {
     ugChannels = parseM3U(ugRes.data, 'ug');
     adultChannels = fetchedAdultChannels;
 
-    // Apply adult filtering across all catalogs when disabled.
     if (!ENABLE_ADULT) {
       usChannels = usChannels.filter(ch => !ch.isAdult);
       caChannels = caChannels.filter(ch => !ch.isAdult);
@@ -312,28 +247,29 @@ async function refreshChannels() {
 
     allChannels = [...usChannels, ...caChannels, ...ugChannels, ...adultChannels];
 
-    // Collect unique genres
     const genreSet = new Set();
     allChannels.forEach(ch => ch.groups.forEach(g => genreSet.add(g)));
     allGenres = [...genreSet].sort();
 
     lastFetch = now;
+    syncRuntimeState({
+      usChannels,
+      caChannels,
+      ugChannels,
+      adultChannels,
+      allChannels,
+      allGenres,
+      lastFetch
+    });
     log(`Loaded ${usChannels.length} US + ${caChannels.length} CA + ${ugChannels.length} UG + ${adultChannels.length} Adult = ${allChannels.length} total channels`);
     log(`Health filter=${HEALTH_FILTER} strictValidation=${STRICT_IPTV_VALIDATION} adult=${ENABLE_ADULT} adultSources=${ADULT_M3U_URLS.length}`);
     log(`Found ${allGenres.length} genres: ${allGenres.slice(0, 15).join(', ')}...`);
 
-    // Run async health check on all channels.
     runHealthCheck().catch(err => log(`Health check failed to start: ${err.message}`));
   } catch (err) {
     log(`ERROR fetching channels: ${err.message}`);
-    // Keep old data if we have it
   }
 }
-
-// ─── Health Check ─────────────────────────────────────────────────────────────
-let healthCheckDone = false;
-let healthCheckRunning = false;
-let lastHealthCheckAt = 0;
 
 async function probeStream(channel) {
   try {
@@ -347,7 +283,6 @@ async function probeStream(channel) {
     });
   } catch (headErr) {
     const status = headErr?.response?.status;
-    // Some IPTV hosts reject HEAD; fall back to a tiny ranged GET.
     if (![400, 401, 403, 405].includes(status)) throw headErr;
 
     const response = await axios.get(channel.url, {
@@ -360,7 +295,6 @@ async function probeStream(channel) {
       httpsAgent
     });
 
-    // Ensure ranged probe does not keep downloading.
     if (response?.data && typeof response.data.destroy === 'function') {
       response.data.destroy();
     }
@@ -391,12 +325,12 @@ async function checkStreamHealth(channel) {
   }
 }
 
-// Run in batches to avoid hammering servers but still check ALL channels
 async function runHealthCheck() {
   if (healthCheckRunning || allChannels.length === 0) return;
 
   healthCheckRunning = true;
-  const BATCH = 30;
+  runtimeState.healthCheckRunning = true;
+  const BATCH = HEALTH_BATCH_SIZE;
   const channels = [...allChannels];
   log(`Running health check on all ${channels.length} channels in batches of ${BATCH}...`);
 
@@ -411,12 +345,16 @@ async function runHealthCheck() {
     log(`Health check complete: ${healthy}/${allChannels.length} (${pct}%) streams live`);
     healthCheckDone = true;
     lastHealthCheckAt = Date.now();
+    syncRuntimeState({
+      healthCheckDone,
+      lastHealthCheckAt
+    });
   } finally {
     healthCheckRunning = false;
+    runtimeState.healthCheckRunning = false;
   }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 function channelToMeta(ch) {
   const countryFlag = ch.country === 'us'
     ? '🇺🇸 USA'
@@ -441,7 +379,6 @@ function channelToMeta(ch) {
   };
 }
 
-// Build a proxied URL that routes through our relay server
 function buildProxyUrl(originalUrl, extraHeaders) {
   if (!PROXY_HOST) return originalUrl;
   const params = new URLSearchParams({ url: originalUrl });
@@ -458,7 +395,6 @@ function channelToStream(ch) {
     : '';
   const relayLabel = PROXY_HOST ? ' [Relay]' : '';
 
-  // Route through relay proxy when PROXY_HOST is configured
   const streamUrl = buildProxyUrl(ch.url, ch.extraHeaders);
 
   const stream = {
@@ -481,7 +417,6 @@ function channelToStream(ch) {
   return stream;
 }
 
-// ─── Manifest ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'community.freevie',
   version: '2.2.1',
@@ -546,10 +481,8 @@ const manifest = {
   behaviorHints: { configurable: false }
 };
 
-// ─── Addon Builder ────────────────────────────────────────────────────────────
 const builder = new addonBuilder(manifest);
 
-// Catalog handler
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   if (type !== 'tv') return { metas: [] };
   if (!ENABLE_ADULT && id === 'freevie_adult') return { metas: [] };
@@ -565,12 +498,10 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
   let filtered = pool;
 
-  // If health check is done, filter out dead streams from catalog
   if (HEALTH_FILTER && healthCheckDone) {
     filtered = filtered.filter(ch => ch.healthy);
   }
 
-  // Genre filter
   if (extra?.genre) {
     const genre = extra.genre.toLowerCase();
     filtered = filtered.filter(ch =>
@@ -578,7 +509,6 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     );
   }
 
-  // Search filter
   if (extra?.search) {
     const query = extra.search.toLowerCase();
     filtered = filtered.filter(ch =>
@@ -586,7 +516,6 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     );
   }
 
-  // Pagination
   const skip = parseInt(extra?.skip) || 0;
   const PAGE_SIZE = 100;
   const page = filtered.slice(skip, skip + PAGE_SIZE);
@@ -594,7 +523,6 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   return { metas: page.map(channelToMeta) };
 });
 
-// Meta handler
 builder.defineMetaHandler(async ({ type, id }) => {
   if (type !== 'tv' || !id.startsWith('freevie:')) return { meta: null };
 
@@ -607,7 +535,6 @@ builder.defineMetaHandler(async ({ type, id }) => {
   return { meta: channelToMeta(ch) };
 });
 
-// Stream handler — returns all matching streams sorted fastest-first
 builder.defineStreamHandler(async ({ type, id }) => {
   if (type !== 'tv' || !id.startsWith('freevie:')) return { streams: [] };
 
@@ -617,35 +544,27 @@ builder.defineStreamHandler(async ({ type, id }) => {
   const ch = allChannels.find(c => c.id === channelId);
   if (!ch) return { streams: [] };
 
-  // Find all channels with similar names for alternative feeds
   const baseName = ch.name.replace(/\s*\(.*?\)\s*/g, '').trim().toLowerCase();
   const alternatives = allChannels.filter(alt => {
     const altBase = alt.name.replace(/\s*\(.*?\)\s*/g, '').trim().toLowerCase();
     return altBase === baseName && alt.id !== ch.id;
   });
 
-  // Combine primary + alternatives, then sort for best stability
-  // Priority: healthy > fast response > prefer HD (FHD/4K freezes on free CDNs)
   const QUALITY_SCORE = { 'SD': 0, '360p': 1, '240p': 2, 'HD': 3, 'FHD': 4, '4K': 5 };
 
   const candidates = [ch, ...alternatives]
-    // Drop weak streams when health filtering is enabled.
     .filter(c => {
       if (!HEALTH_FILTER || !healthCheckDone) return true;
       return c.healthy && (c.responseMs || 0) < 3000;
     })
     .sort((a, b) => {
-      // Faster response always wins
       const msDiff = (a.responseMs || 99999) - (b.responseMs || 99999);
-      // Penalise FHD/4K: free CDNs can't sustain high bitrates reliably
-      const aQ = QUALITY_SCORE[a.quality] ?? 3; // unknown = treat as HD
+      const aQ = QUALITY_SCORE[a.quality] ?? 3;
       const bQ = QUALITY_SCORE[b.quality] ?? 3;
-      // If one is HD and the other is FHD/4K, prefer HD if response is similar
       const qualityPenalty = (aQ > 3 ? 500 : 0) - (bQ > 3 ? 500 : 0);
       return msDiff + qualityPenalty;
     });
 
-  // Fallback: if all streams got filtered, include unhealthy ones rather than returning nothing
   const finalCandidates = candidates.length > 0
     ? candidates
     : [ch, ...alternatives].sort((a, b) => (a.responseMs || 99999) - (b.responseMs || 99999));
@@ -659,12 +578,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
   return { streams };
 });
 
-// ─── Server with Health Endpoint ──────────────────────────────────────────────
 const addonInterface = builder.getInterface();
 
-// Create a custom server that handles /health and delegates the rest to the SDK
 const server = http.createServer(async (req, res) => {
-  // CORS headers for all responses
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -675,7 +591,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Health check endpoint
   if (req.url === '/health') {
     const healthData = {
       status: 'ok',
@@ -709,7 +624,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ─── Stream Proxy Relay ───────────────────────────────────────────────────────
   if (req.url.startsWith('/proxy')) {
     const reqUrl = new URL(req.url, `http://localhost:${PORT}`);
     const targetUrl = reqUrl.searchParams.get('url');
@@ -726,7 +640,6 @@ const server = http.createServer(async (req, res) => {
       if (headersParam) extraHeaders = JSON.parse(headersParam);
     } catch (_) { }
 
-    // ── Playlist cache hit: serve rewritten .m3u8 from memory (no CDN round-trip) ──
     const isPlaylist = targetUrl.includes('.m3u8') || targetUrl.includes('m3u');
     if (isPlaylist) {
       const cachedPlaylist = playlistCache.get(targetUrl);
@@ -742,7 +655,6 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // ── Segment cache hit: serve segment from memory instantly, no CDN round-trip ──
     const cached = segmentCache.get(targetUrl);
     if (cached && cached.data && (Date.now() - cached.fetchedAt) < SEGMENT_CACHE_TTL) {
       res.writeHead(200, {
@@ -755,9 +667,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Segments: 4s timeout — fast fail so Stremio retries immediately instead
-    // of freezing for 6 full seconds on a slow CDN response.
-    // Playlists: 12s — they're small text files, extra time is fine.
     const isSegment = /\.(ts|aac|mp4|m4s|cmfv|cmfa)(\?|$)/i.test(targetUrl);
     const timeout = isSegment ? 4000 : 12000;
 
@@ -781,7 +690,6 @@ const server = http.createServer(async (req, res) => {
         const base = new URL(targetUrl);
         const baseDir = base.href.substring(0, base.href.lastIndexOf('/') + 1);
 
-        // Collect original segment URLs for pre-fetching BEFORE rewriting
         const toPreFetch = playlist.split('\n')
           .map(l => l.trim())
           .filter(l => l && !l.startsWith('#'))
@@ -789,7 +697,6 @@ const server = http.createServer(async (req, res) => {
           .filter(Boolean)
           .slice(0, PREFETCH_COUNT);
 
-        // Fire-and-forget: start downloading next segments immediately
         prefetchSegments(toPreFetch, extraHeaders);
 
         const rewritten = playlist.split('\n').map(line => {
@@ -803,8 +710,6 @@ const server = http.createServer(async (req, res) => {
           return `${PROXY_HOST}/proxy?${proxyParams.toString()}`;
         }).join('\n');
 
-        // Cache the rewritten playlist for 4s — Stremio polls every 2s so this
-        // halves CDN hits with no quality impact on live streams.
         playlistCache.set(targetUrl, { content: rewritten, fetchedAt: Date.now() });
 
         res.writeHead(200, {
@@ -838,7 +743,6 @@ const server = http.createServer(async (req, res) => {
             : err.code === 'ECONNABORTED' ? `TIMEOUT [${timeout}ms]`
               : err.code || 'UPSTREAM ERROR';
       log(`PROXY ${label} ${targetUrl.slice(0, 80)}: ${err.message}`);
-      // On token expiry or rate limit, clear playlist cache so next poll gets fresh URLs
       if (isTokenExpiry || isRateLimit) {
         playlistCache.delete(targetUrl);
         log(`Cleared playlist cache for ${targetUrl.slice(0, 60)} to force fresh token`);
@@ -866,8 +770,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Delegate all other requests to the Stremio addon SDK
-  // addonInterface.get(resource, type, id, extra) is the SDK's routing method
   try {
     const cleanUrl = decodeURIComponent(req.url);
     const match = cleanUrl.match(/^\/(catalog|meta|stream)\/([^/]+)\/([^/]+?)(?:\/([^/]+?))?\.json$/);
@@ -875,7 +777,6 @@ const server = http.createServer(async (req, res) => {
     if (match) {
       const [, resource, type, id, extraStr] = match;
 
-      // Parse extras
       const extra = {};
       if (extraStr) {
         extraStr.split('&').forEach(pair => {
@@ -899,16 +800,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Fallback 404
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Not found' }));
 });
 
-// ─── Start ────────────────────────────────────────────────────────────────────
 async function start() {
   log('Freevie starting up...');
 
-  // Pre-fetch channels before server starts
   await refreshChannels();
 
   if (HEALTH_CHECK_INTERVAL > 0) {
