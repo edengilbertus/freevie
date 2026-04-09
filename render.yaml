@@ -24,6 +24,8 @@ services:
         value: "https://iptvmate.net/files/xxx.m3u"
       - key: UG_M3U_URL
         value: "https://iptv-org.github.io/iptv/countries/ug.m3u"
+      - key: EXTRA_M3U_URLS
+        value: "https://iptv-org.github.io/iptv/countries/gb.m3u,https://iptv-org.github.io/iptv/countries/ke.m3u,https://iptv-org.github.io/iptv/countries/ng.m3u,https://iptv-org.github.io/iptv/countries/za.m3u"
       - key: PROXY_HOST
         value: ""
         # Set this to your Render URL, e.g: https://freevie.onrender.com

@@ -9,6 +9,7 @@ const {
   US_M3U_URL,
   CA_M3U_URL,
   UG_M3U_URL,
+  EXTRA_M3U_URLS,
   ADULT_M3U_URLS,
   ENABLE_ADULT,
   HEALTH_FILTER,
@@ -30,6 +31,7 @@ let {
   usChannels,
   caChannels,
   ugChannels,
+  extraChannels,
   adultChannels,
   allChannels,
   allGenres,
@@ -49,16 +51,78 @@ function looksLikeLiveStream(url) {
   return /\.(m3u8|ts|mpd)(\?|$)/i.test(url || '');
 }
 
+function scoreChannelVariant(channel) {
+  let score = 0;
+  if (channel.poster || channel.logo) score += 4;
+  if (channel.tvgId) score += 2;
+  if (channel.extraHeaders) score += 1;
+  if (channel.quality === '4K') score += 4;
+  else if (channel.quality === 'FHD') score += 3;
+  else if (channel.quality === 'HD') score += 2;
+  else if (channel.quality) score += 1;
+  score += Math.min((channel.groups || []).length, 3);
+  return score;
+}
+
+function dedupeKeyForChannel(channel) {
+  const identity = channel.canonicalId || channel.normalizedName || String(channel.name || '').trim().toLowerCase();
+  return `${identity}:${channel.url}`;
+}
+
 function dedupeChannels(channels) {
-  const deduped = [];
-  const seen = new Set();
+  const deduped = new Map();
   for (const channel of channels) {
-    const key = `${channel.id}:${channel.url}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(channel);
+    const key = dedupeKeyForChannel(channel);
+    const existing = deduped.get(key);
+    if (!existing || scoreChannelVariant(channel) > scoreChannelVariant(existing)) {
+      deduped.set(key, channel);
+    }
   }
-  return deduped;
+  return [...deduped.values()];
+}
+
+function formatRegionLabel(country) {
+  const normalized = String(country || '').trim().toLowerCase();
+  if (!normalized || normalized === 'global') return 'Global';
+  if (normalized === 'us') return 'USA';
+  if (normalized === 'ca') return 'Canada';
+  if (normalized === 'ug') return 'Uganda';
+  if (normalized === 'adult') return 'Adult';
+  return normalized
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+async function fetchM3USource({ url, sourceId, country, label }) {
+  const attempts = [
+    { timeout: 15000, retryLabel: 'attempt 1' },
+    { timeout: 25000, retryLabel: 'retry' }
+  ];
+
+  for (let index = 0; index < attempts.length; index += 1) {
+    const attempt = attempts[index];
+    try {
+      const response = await axios.get(url, {
+        timeout: attempt.timeout,
+        httpAgent,
+        httpsAgent
+      });
+      const parsed = parseM3USource({ content: response.data, sourceId, country });
+      const phase = index === 0 ? 'loaded' : 'loaded on retry';
+      log(`${label} source ${phase}: ${url} (${parsed.length} channels)`);
+      return parsed;
+    } catch (err) {
+      if (index === attempts.length - 1) {
+        log(`${label} source failed (${url}) — ${err.message} — status: ${err.response?.status || 'no response'}`);
+        return [];
+      }
+      log(`${label} source ${attempt.retryLabel} failed (${url}): ${err.message}, retrying...`);
+    }
+  }
+
+  return [];
 }
 
 setInterval(() => {
@@ -114,53 +178,56 @@ async function refreshChannels() {
   log('Fetching fresh channel lists...');
 
   try {
-    const fetchAdultSource = async (url) => {
-      try {
-        const response = await axios.get(url, { timeout: 20000, httpAgent, httpsAgent });
-        const parsed = parseM3USource({ content: response.data, sourceId: 'adult', country: 'adult' });
-        log(`Adult source loaded: ${url} (${parsed.length} channels)`);
-        return parsed;
-      } catch (firstErr) {
-        log(`Adult source attempt 1 failed (${url}): ${firstErr.message}, retrying...`);
-        try {
-          const response = await axios.get(url, { timeout: 25000, httpAgent, httpsAgent });
-          const parsed = parseM3USource({ content: response.data, sourceId: 'adult', country: 'adult' });
-          log(`Adult source loaded on retry: ${url} (${parsed.length} channels)`);
-          return parsed;
-        } catch (secondErr) {
-          log(`Adult source failed (${url}) — ${secondErr.message} — status: ${secondErr.response?.status || 'no response'}`);
-          return [];
-        }
-      }
-    };
-
     const fetchAdult = async () => {
       if (!ENABLE_ADULT) return [];
-      const sourceResults = await Promise.all(ADULT_M3U_URLS.map(fetchAdultSource));
+      const sourceResults = await Promise.all(
+        ADULT_M3U_URLS.map((url, index) => fetchM3USource({
+          url,
+          sourceId: `adult_${index + 1}`,
+          country: 'adult',
+          label: 'Adult'
+        }))
+      );
       const merged = dedupeChannels(sourceResults.flat());
       return merged;
     };
 
-    const [usRes, caRes, ugRes, fetchedAdultChannels] = await Promise.all([
-      axios.get(US_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
-      axios.get(CA_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
-      axios.get(UG_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
+    const extraSourceConfigs = EXTRA_M3U_URLS.map((url, index) => ({
+      url,
+      sourceId: `extra_${index + 1}`,
+      country: 'global',
+      label: `Extra ${index + 1}`
+    }));
+
+    const [fetchedUsChannels, fetchedCaChannels, fetchedUgChannels, fetchedExtraChannels, fetchedAdultChannels] = await Promise.all([
+      fetchM3USource({ url: US_M3U_URL, sourceId: 'us', country: 'us', label: 'US' }),
+      fetchM3USource({ url: CA_M3U_URL, sourceId: 'ca', country: 'ca', label: 'Canada' }),
+      fetchM3USource({ url: UG_M3U_URL, sourceId: 'ug', country: 'ug', label: 'Uganda' }),
+      Promise.all(extraSourceConfigs.map(fetchM3USource)).then((results) => dedupeChannels(results.flat())),
       fetchAdult()
     ]);
 
-    usChannels = parseM3USource({ content: usRes.data, sourceId: 'us', country: 'us' });
-    caChannels = parseM3USource({ content: caRes.data, sourceId: 'ca', country: 'ca' });
-    ugChannels = parseM3USource({ content: ugRes.data, sourceId: 'ug', country: 'ug' });
+    usChannels = fetchedUsChannels;
+    caChannels = fetchedCaChannels;
+    ugChannels = fetchedUgChannels;
+    extraChannels = fetchedExtraChannels;
     adultChannels = fetchedAdultChannels;
 
     if (!ENABLE_ADULT) {
       usChannels = usChannels.filter(ch => !ch.isAdult);
       caChannels = caChannels.filter(ch => !ch.isAdult);
       ugChannels = ugChannels.filter(ch => !ch.isAdult);
+      extraChannels = extraChannels.filter(ch => !ch.isAdult);
       adultChannels = [];
     }
 
-    allChannels = [...usChannels, ...caChannels, ...ugChannels, ...adultChannels];
+    allChannels = dedupeChannels([
+      ...usChannels,
+      ...caChannels,
+      ...ugChannels,
+      ...extraChannels,
+      ...adultChannels
+    ]);
 
     allGenres = collectCatalogGenres(allChannels);
 
@@ -169,13 +236,14 @@ async function refreshChannels() {
       usChannels,
       caChannels,
       ugChannels,
+      extraChannels,
       adultChannels,
       allChannels,
       allGenres,
       lastFetch
     });
-    log(`Loaded ${usChannels.length} US + ${caChannels.length} CA + ${ugChannels.length} UG + ${adultChannels.length} Adult = ${allChannels.length} total channels`);
-    log(`Health filter=${HEALTH_FILTER} strictValidation=${STRICT_IPTV_VALIDATION} adult=${ENABLE_ADULT} adultSources=${ADULT_M3U_URLS.length}`);
+    log(`Loaded ${usChannels.length} US + ${caChannels.length} CA + ${ugChannels.length} UG + ${extraChannels.length} Extra + ${adultChannels.length} Adult = ${allChannels.length} total channels`);
+    log(`Health filter=${HEALTH_FILTER} strictValidation=${STRICT_IPTV_VALIDATION} extraSources=${EXTRA_M3U_URLS.length} adult=${ENABLE_ADULT} adultSources=${ADULT_M3U_URLS.length}`);
     log(`Found ${allGenres.length} genres: ${allGenres.slice(0, 15).join(', ')}...`);
 
     runHealthCheck().catch(err => log(`Health check failed to start: ${err.message}`));
@@ -269,14 +337,9 @@ async function runHealthCheck() {
 }
 
 function channelToMeta(ch) {
-  const countryFlag = ch.country === 'us'
-    ? '🇺🇸 USA'
-    : ch.country === 'ca'
-      ? '🇨🇦 Canada'
-      : ch.country === 'ug'
-        ? '🇺🇬 Uganda'
-        : '🔞 Adult';
+  const regionLabel = formatRegionLabel(ch.country);
   const qualityBadge = ch.quality ? ` (${ch.quality})` : '';
+  const genres = [ch.primaryGroup, regionLabel].filter((value, index, list) => list.indexOf(value) === index);
 
   return {
     id: `freevie:${ch.id}`,
@@ -285,8 +348,8 @@ function channelToMeta(ch) {
     poster: ch.poster || ch.logo || undefined,
     logo: ch.logo || ch.poster || undefined,
     posterShape: 'square',
-    description: `Live TV: ${ch.name}${qualityBadge} — ${countryFlag}`,
-    genres: [ch.primaryGroup, countryFlag],
+    description: `Live TV: ${ch.name}${qualityBadge} — ${regionLabel}`,
+    genres,
     links: [],
     background: ch.poster || ch.logo || undefined
   };
@@ -300,19 +363,19 @@ function buildProxyUrl(originalUrl, extraHeaders) {
 }
 
 function channelToStream(ch) {
-  const healthIcon = ch.healthy ? '🟢' : '⚠️';
   const qualityLabel = ch.quality || 'Live';
-  const countryLabel = ch.country.toUpperCase();
+  const countryLabel = formatRegionLabel(ch.country);
   const speedLabel = ch.responseMs && ch.responseMs < 99999
     ? ` • ${ch.responseMs}ms`
     : '';
   const relayLabel = PROXY_HOST ? ' [Relay]' : '';
+  const fallbackLabel = ch.healthy === false ? ' Fallback' : '';
 
   const streamUrl = buildProxyUrl(ch.url, ch.extraHeaders);
 
   const stream = {
     url: streamUrl,
-    name: `${healthIcon} ${qualityLabel}${speedLabel}${relayLabel}`,
+    name: `${qualityLabel}${speedLabel}${relayLabel}${fallbackLabel}`,
     description: `${ch.name} — ${countryLabel}`,
     behaviorHints: {
       notWebReady: true,
@@ -333,14 +396,14 @@ function channelToStream(ch) {
 const manifest = {
   id: 'community.freevie',
   version: '2.2.1',
-  name: 'Freevie — Live TV',
+  name: 'Freevie Live TV',
   description: 'Free live TV channels from USA, Canada & Uganda. Open source, self-hostable.',
   types: ['tv'],
   catalogs: [
     {
       type: 'tv',
       id: 'freevie_us',
-      name: '🇺🇸 USA TV',
+      name: 'USA TV',
       extra: [
         { name: 'genre', isRequired: false, options: [] },
         { name: 'search', isRequired: false },
@@ -350,7 +413,7 @@ const manifest = {
     {
       type: 'tv',
       id: 'freevie_ca',
-      name: '🇨🇦 Canada TV',
+      name: 'Canada TV',
       extra: [
         { name: 'genre', isRequired: false, options: [] },
         { name: 'search', isRequired: false },
@@ -360,7 +423,7 @@ const manifest = {
     {
       type: 'tv',
       id: 'freevie_ug',
-      name: '🇺🇬 Uganda TV',
+      name: 'Uganda TV',
       extra: [
         { name: 'genre', isRequired: false, options: [] },
         { name: 'search', isRequired: false },
@@ -370,7 +433,7 @@ const manifest = {
     {
       type: 'tv',
       id: 'freevie_adult',
-      name: '🔞 Adult',
+      name: 'Adult',
       extra: [
         { name: 'genre', isRequired: false, options: [] },
         { name: 'search', isRequired: false },
@@ -380,7 +443,7 @@ const manifest = {
     {
       type: 'tv',
       id: 'freevie_all',
-      name: '📺 All Channels',
+      name: 'All Channels',
       extra: [
         { name: 'genre', isRequired: false, options: [] },
         { name: 'search', isRequired: false },
@@ -510,6 +573,8 @@ const server = http.createServer(async (req, res) => {
         us: usChannels.length,
         ca: caChannels.length,
         ug: ugChannels.length,
+        extra: extraChannels.length,
+        adult: adultChannels.length,
         total: allChannels.length
       },
       health: {
@@ -719,9 +784,9 @@ async function start() {
   }
 
   server.listen(PORT, () => {
-    log(`✅ Freevie Live TV addon running at http://localhost:${PORT}`);
-    log(`📺 Install URL: http://YOUR_SERVER_IP:${PORT}/manifest.json`);
-    log(`❤️  Health check: http://localhost:${PORT}/health`);
+    log(`Freevie Live TV addon running at http://localhost:${PORT}`);
+    log(`Install URL: http://YOUR_SERVER_IP:${PORT}/manifest.json`);
+    log(`Health check: http://localhost:${PORT}/health`);
   });
 }
 

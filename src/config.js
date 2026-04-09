@@ -29,6 +29,17 @@ const CACHE_TTL = envInt('CACHE_TTL', 60 * 60 * 1000);
 const US_M3U_URL = process.env.US_M3U_URL || 'https://iptv-org.github.io/iptv/countries/us.m3u';
 const CA_M3U_URL = process.env.CA_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ca.m3u';
 const UG_M3U_URL = process.env.UG_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ug.m3u';
+const DEFAULT_EXTRA_M3U_URLS = [
+  'https://iptv-org.github.io/iptv/countries/gb.m3u',
+  'https://iptv-org.github.io/iptv/countries/ke.m3u',
+  'https://iptv-org.github.io/iptv/countries/ng.m3u',
+  'https://iptv-org.github.io/iptv/countries/za.m3u'
+];
+const EXTRA_M3U_URLS = (() => {
+  const configuredList = parseUrlList(process.env.EXTRA_M3U_URLS);
+  if (configuredList.length > 0) return configuredList;
+  return DEFAULT_EXTRA_M3U_URLS;
+})();
 const LEGACY_ADULT_M3U_URL = process.env.ADULT_M3U_URL ? process.env.ADULT_M3U_URL.trim() : '';
 const DEFAULT_ADULT_M3U_URLS = [
   'https://raw.githubusercontent.com/sacuar/MyIPTV/main/Play1.m3u',
@@ -72,6 +83,8 @@ module.exports = {
   US_M3U_URL,
   CA_M3U_URL,
   UG_M3U_URL,
+  DEFAULT_EXTRA_M3U_URLS,
+  EXTRA_M3U_URLS,
   LEGACY_ADULT_M3U_URL,
   DEFAULT_ADULT_M3U_URLS,
   ADULT_M3U_URLS,

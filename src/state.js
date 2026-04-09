@@ -10,6 +10,7 @@ const runtimeState = {
   usChannels: [],
   caChannels: [],
   ugChannels: [],
+  extraChannels: [],
   adultChannels: [],
   allChannels: [],
   allGenres: [],
