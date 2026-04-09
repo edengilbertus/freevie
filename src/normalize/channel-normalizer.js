@@ -1,4 +1,5 @@
 const { createChannelRecord } = require('../models/channel');
+const { enrichChannelCategory } = require('./channel-ranking');
 
 const ADULT_KEYWORD_REGEX = /\b(adult|xxx|18\+|porn|sex|erotic)\b/i;
 const QUALITY_REGEX = /\b(2160p|4k|uhd|1080p|fhd|720p|hd|480p|sd|360p|240p)\b/ig;
@@ -77,7 +78,7 @@ function normalizeChannel(input) {
   const canonicalId = deriveCanonicalId(normalizedName);
   const sourceId = input.sourceId || input.country || 'global';
 
-  return createChannelRecord({
+  return enrichChannelCategory(createChannelRecord({
     id: input.id || deriveRuntimeId(sourceId, input.tvgId, canonicalId),
     sourceId,
     sourceType: input.sourceType || 'm3u',
@@ -99,7 +100,7 @@ function normalizeChannel(input) {
     lastHealthError: input.lastHealthError,
     responseMs: input.responseMs,
     isAdult
-  });
+  }));
 }
 
 module.exports = {

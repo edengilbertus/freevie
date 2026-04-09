@@ -22,6 +22,8 @@ const { log } = require('./src/log');
 const { runtimeState, cacheConfig, syncRuntimeState } = require('./src/state');
 const { parseM3USource } = require('./src/sources/m3u');
 const { findAlternativeChannels } = require('./src/normalize/channel-matching');
+const { collectCatalogGenres } = require('./src/normalize/channel-ranking');
+const { buildCatalogPage } = require('./src/catalog/channel-catalog');
 const { SEGMENT_CACHE_TTL, PREFETCH_COUNT, PLAYLIST_CACHE_TTL, MAX_CONCURRENT_PREFETCHES, HEALTH_BATCH_SIZE } = cacheConfig;
 const { segmentCache, playlistCache } = runtimeState;
 let {
@@ -160,9 +162,7 @@ async function refreshChannels() {
 
     allChannels = [...usChannels, ...caChannels, ...ugChannels, ...adultChannels];
 
-    const genreSet = new Set();
-    allChannels.forEach(ch => ch.groups.forEach(g => genreSet.add(g)));
-    allGenres = [...genreSet].sort();
+    allGenres = collectCatalogGenres(allChannels);
 
     lastFetch = now;
     syncRuntimeState({
@@ -415,23 +415,17 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     filtered = filtered.filter(ch => ch.healthy);
   }
 
-  if (extra?.genre) {
-    const genre = extra.genre.toLowerCase();
-    filtered = filtered.filter(ch =>
-      ch.groups.some(g => g.toLowerCase() === genre)
-    );
-  }
-
-  if (extra?.search) {
-    const query = extra.search.toLowerCase();
-    filtered = filtered.filter(ch =>
-      ch.name.toLowerCase().includes(query)
-    );
-  }
-
-  const skip = parseInt(extra?.skip) || 0;
   const PAGE_SIZE = 100;
-  const page = filtered.slice(skip, skip + PAGE_SIZE);
+  const page = buildCatalogPage(filtered, {
+    genre: extra?.genre,
+    search: extra?.search,
+    skip: extra?.skip,
+    pageSize: PAGE_SIZE,
+    rankContext: {
+      catalogId: id,
+      genre: extra?.genre
+    }
+  });
 
   return { metas: page.map(channelToMeta) };
 });

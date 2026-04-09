@@ -43,3 +43,17 @@ test('normalizeChannel infers adult and fallback group labels', () => {
   assert.equal(channel.primaryGroup, 'Adult');
   assert.equal(channel.isAdult, true);
 });
+
+test('normalizeChannel upgrades noisy movie groups into curated primary categories', () => {
+  const channel = normalizeChannel({
+    sourceId: 'us',
+    sourceType: 'm3u',
+    name: 'Cinema Central',
+    url: 'https://example.com/live/cinema.m3u8',
+    groups: ['24/7 Movies', 'Cinema'],
+    country: 'us'
+  });
+
+  assert.equal(channel.primaryGroup, 'Movies');
+  assert.deepEqual(channel.groups, ['Movies', '24/7 Movies', 'Cinema']);
+});
