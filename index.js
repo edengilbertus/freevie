@@ -22,6 +22,7 @@ const {
 const { log } = require('./src/log');
 const { runtimeState, cacheConfig, syncRuntimeState } = require('./src/state');
 const { parseM3USource } = require('./src/sources/m3u');
+const { BUILT_IN_ADULT_PLAYLIST } = require('./src/sources/built-in-adult-playlist');
 const { findAlternativeChannels } = require('./src/normalize/channel-matching');
 const { collectCatalogGenres } = require('./src/normalize/channel-ranking');
 const { buildCatalogPage } = require('./src/catalog/channel-catalog');
@@ -180,6 +181,12 @@ async function refreshChannels() {
   try {
     const fetchAdult = async () => {
       if (!ENABLE_ADULT) return [];
+      const builtInAdultChannels = parseM3USource({
+        content: BUILT_IN_ADULT_PLAYLIST,
+        sourceId: 'adult_builtin',
+        country: 'adult'
+      });
+      log(`Adult built-in source loaded (${builtInAdultChannels.length} channels)`);
       const sourceResults = await Promise.all(
         ADULT_M3U_URLS.map((url, index) => fetchM3USource({
           url,
@@ -188,7 +195,7 @@ async function refreshChannels() {
           label: 'Adult'
         }))
       );
-      const merged = dedupeChannels(sourceResults.flat());
+      const merged = dedupeChannels([...builtInAdultChannels, ...sourceResults.flat()]);
       return merged;
     };
 
