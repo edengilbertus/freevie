@@ -562,12 +562,13 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
   const baseMetas = page.map(channelToMeta);
 
   // VAVOO INTEGRATION: Fetch and merge TvVoo channels into relevant catalogs
-  if (['freevie_sports', 'freevie_eu', 'freevie_uk', 'freevie_all'].includes(id)) {
+  // We exclude 'freevie_all' here so that standard localized channels (like Uganda) aren't pushed out of the UI
+  if (['freevie_sports', 'freevie_eu', 'freevie_uk'].includes(id)) {
     try {
       let tvvooCatalog = '';
       if (id === 'freevie_uk') tvvooCatalog = 'vavoo_tv_uk';
       if (id === 'freevie_eu') tvvooCatalog = 'vavoo_tv_de'; // DE has massive Euro sport coverage
-      if (id === 'freevie_sports' || id === 'freevie_all') tvvooCatalog = 'vavoo_tv_uk'; // We merge UK bundle which has massive sports
+      if (id === 'freevie_sports') tvvooCatalog = 'vavoo_tv_uk'; // We merge UK bundle which has massive sports
 
       const skip = extra?.skip ? `&skip=${extra.skip}` : '';
       const search = extra?.search ? `&search=${encodeURIComponent(extra.search)}` : '';
