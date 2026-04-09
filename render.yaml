@@ -10,6 +10,18 @@ services:
         value: 10000
       - key: CACHE_TTL
         value: 3600000
+      - key: HEALTH_CHECK_INTERVAL
+        value: 1800000
+      - key: HEALTH_FILTER
+        value: "true"
+      - key: STRICT_IPTV_VALIDATION
+        value: "false"
+      - key: ENABLE_ADULT
+        value: "true"
+      - key: ADULT_M3U_URL
+        value: "https://iptvmate.net/files/xxx.m3u"
+      - key: UG_M3U_URL
+        value: "https://iptv-org.github.io/iptv/countries/ug.m3u"
       - key: PROXY_HOST
         value: ""
         # Set this to your Render URL, e.g: https://freevie.onrender.com

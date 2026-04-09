@@ -1,20 +1,23 @@
 # Freevie — Free Live TV for Stremio
 
-An open-source Stremio addon that streams **live USA & Canada TV channels** for free. Self-hostable, no accounts required.
+An open-source Stremio addon that streams **live USA, Canada, and Uganda TV channels** for free. Self-hostable, no accounts required.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D16-green.svg)
-![Version](https://img.shields.io/badge/version-2.0.1-orange.svg)
+![Version](https://img.shields.io/badge/version-2.2.1-orange.svg)
 
 ---
 
 ## Features
 
-- **500+ channels** — USA and Canada, auto-updated hourly from [iptv-org](https://github.com/iptv-org/iptv)
+- **500+ channels** — USA, Canada, and Uganda, auto-updated hourly from [iptv-org](https://github.com/iptv-org/iptv)
 - **Search** — find channels by name directly in Stremio
 - **Browse by genre** — News, Sports, Kids, Entertainment, and 30+ categories
 - **Stream health check** — dead streams flagged automatically
 - **Alternative feeds** — multiple stream sources per channel when available
+- **MediaFusion-style IPTV checks** — optional strict content-type validation for live streams
+- **Configurable health filtering** — hide unhealthy channels in catalogs when enabled
+- **Request header forwarding** — stream-level proxy headers preserved in behavior hints
 - **CORS enabled** — works from Stremio web client
 - **Health endpoint** — `/health` for uptime monitoring
 - **Completely free** — no API keys, no debrid, no subscriptions
@@ -101,9 +104,15 @@ Then install: `http://localhost:7000/manifest.json`
 |---|---|---|
 | `PORT` | `7000` | Server port |
 | `CACHE_TTL` | `3600000` | Channel refresh interval in ms (default: 1 hour) |
+| `HEALTH_CHECK_INTERVAL` | `1800000` | How often to run full channel health checks in ms (default: 30 min) |
+| `HEALTH_FILTER` | `true` | If `true`, hide unhealthy channels from catalogs after health checks run |
+| `STRICT_IPTV_VALIDATION` | `false` | If `true`, require IPTV-like content type (`m3u8/ts/mpd`) for healthy status |
 | `PROXY_HOST` | *(unset)* | **Stream relay** — set to your server's public URL (e.g. `http://1.2.3.4:7000`) to route all streams through your server for smoother playback. Only works when deployed on a public server. |
+| `ENABLE_ADULT` | `true` | Enable or disable the adult catalog and adult-like channel entries |
 | `US_M3U_URL` | iptv-org US | Custom M3U source for US channels |
 | `CA_M3U_URL` | iptv-org CA | Custom M3U source for CA channels |
+| `UG_M3U_URL` | iptv-org UG | Custom M3U source for Uganda channels |
+| `ADULT_M3U_URL` | iptvmate XXX | Custom M3U source for adult channels |
 
 ---
 

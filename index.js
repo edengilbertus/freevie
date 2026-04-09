@@ -1,7 +1,18 @@
-const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
+const { addonBuilder } = require('stremio-addon-sdk');
 const axios = require('axios');
 const http = require('http');
 const https = require('https');
+
+function envFlag(name, defaultValue) {
+  const raw = process.env[name];
+  if (raw === undefined) return defaultValue;
+  return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
+}
+
+function envInt(name, defaultValue) {
+  const parsed = Number.parseInt(process.env[name], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
+}
 
 // ─── Persistent HTTP agents (keep-alive connection pooling) ───────────────────
 // Reuse TCP connections to CDNs instead of a new handshake per segment.
@@ -11,14 +22,43 @@ const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, keepAliveM
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 7000;
-const CACHE_TTL = parseInt(process.env.CACHE_TTL) || 60 * 60 * 1000; // 1 hour
+const CACHE_TTL = envInt('CACHE_TTL', 60 * 60 * 1000); // 1 hour
 const US_M3U_URL = process.env.US_M3U_URL || 'https://iptv-org.github.io/iptv/countries/us.m3u';
 const CA_M3U_URL = process.env.CA_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ca.m3u';
-const ADULT_M3U_URL = process.env.ADULT_M3U_URL || 'https://iptv-org.github.io/iptv/categories/xxx.m3u';
+const UG_M3U_URL = process.env.UG_M3U_URL || 'https://iptv-org.github.io/iptv/countries/ug.m3u';
+const ADULT_M3U_URL = process.env.ADULT_M3U_URL || 'https://iptvmate.net/files/xxx.m3u';
+const ENABLE_ADULT = envFlag('ENABLE_ADULT', true);
+const HEALTH_FILTER = envFlag('HEALTH_FILTER', true);
+const STRICT_IPTV_VALIDATION = envFlag('STRICT_IPTV_VALIDATION', false);
+const HEALTH_CHECK_INTERVAL = envInt('HEALTH_CHECK_INTERVAL', 30 * 60 * 1000);
 // When set, all stream URLs are routed through this server as a relay proxy.
 // Example: PROXY_HOST=http://123.45.67.89:7000
 // Leave unset to serve original CDN URLs directly (local dev default).
 const PROXY_HOST = process.env.PROXY_HOST ? process.env.PROXY_HOST.replace(/\/$/, '') : null;
+
+const IPTV_VALID_CONTENT_TYPES = new Set([
+  'application/vnd.apple.mpegurl',
+  'application/x-mpegurl',
+  'video/mp2t',
+  'application/octet-stream',
+  'application/dash+xml'
+]);
+
+const ADULT_KEYWORD_REGEX = /\b(adult|xxx|18\+|porn|sex|erotic)\b/i;
+
+function normalizeContentType(contentType) {
+  if (!contentType) return '';
+  return String(contentType).split(';')[0].trim().toLowerCase();
+}
+
+function looksLikeLiveStream(url) {
+  return /\.(m3u8|ts|mpd)(\?|$)/i.test(url || '');
+}
+
+function isAdultLikeChannel(name, groups) {
+  const haystack = `${name || ''} ${(groups || []).join(' ')}`;
+  return ADULT_KEYWORD_REGEX.test(haystack);
+}
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
 function log(msg) {
@@ -38,7 +78,8 @@ function detectQuality(name) {
 
 function parseM3U(content, country) {
   const channels = [];
-  const lines = content.split('\n');
+  const lines = content.split(/\r?\n/);
+  const seen = new Set();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -62,6 +103,7 @@ function parseM3U(content, country) {
     }
 
     if (!urlLine) continue;
+    if (!/^https?:\/\//i.test(urlLine)) continue;
 
     const nameMatch = line.match(/,(.+)$/);
     const name = nameMatch ? nameMatch[1].trim() : 'Unknown';
@@ -76,10 +118,13 @@ function parseM3U(content, country) {
 
     const groupMatch = line.match(/group-title="([^"]+)"/);
     const groupRaw = groupMatch ? groupMatch[1] : 'General';
-    // Split semicolon-separated groups
-    const groups = groupRaw.split(';').map(g => g.trim()).filter(Boolean);
+    const groups = groupRaw.split(/[,;|]/).map(g => g.trim()).filter(Boolean);
 
     const quality = detectQuality(name);
+
+    const dedupeKey = `${country}_${id}:${urlLine}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
 
     channels.push({
       id: `${country}_${id}`,
@@ -91,7 +136,11 @@ function parseM3U(content, country) {
       country,
       quality,
       extraHeaders: Object.keys(extraHeaders).length > 0 ? extraHeaders : null,
-      healthy: true // assume healthy until checked
+      healthy: true, // assume healthy until checked
+      contentType: null,
+      lastHealthAt: null,
+      lastHealthError: null,
+      isAdult: country === 'adult' || isAdultLikeChannel(name, groups)
     });
   }
 
@@ -101,6 +150,7 @@ function parseM3U(content, country) {
 // ─── Channel Store ────────────────────────────────────────────────────────────
 let usChannels = [];
 let caChannels = [];
+let ugChannels = [];
 let adultChannels = [];
 let allChannels = [];
 let allGenres = [];
@@ -181,8 +231,9 @@ async function refreshChannels() {
   log('Fetching fresh channel lists...');
 
   try {
-    // Fetch US + CA with keep-alive agents, adult with retry
+    // Fetch US + CA + UG with keep-alive agents, adult with retry when enabled
     const fetchAdult = async () => {
+      if (!ENABLE_ADULT) return null;
       try {
         const r = await axios.get(ADULT_M3U_URL, { timeout: 20000, httpAgent, httpsAgent });
         return r;
@@ -198,16 +249,27 @@ async function refreshChannels() {
       }
     };
 
-    const [usRes, caRes, adultRes] = await Promise.all([
+    const [usRes, caRes, ugRes, adultRes] = await Promise.all([
       axios.get(US_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
       axios.get(CA_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
+      axios.get(UG_M3U_URL, { timeout: 15000, httpAgent, httpsAgent }),
       fetchAdult()
     ]);
 
     usChannels = parseM3U(usRes.data, 'us');
     caChannels = parseM3U(caRes.data, 'ca');
+    ugChannels = parseM3U(ugRes.data, 'ug');
     adultChannels = adultRes ? parseM3U(adultRes.data, 'adult') : [];
-    allChannels = [...usChannels, ...caChannels, ...adultChannels];
+
+    // Apply adult filtering across all catalogs when disabled.
+    if (!ENABLE_ADULT) {
+      usChannels = usChannels.filter(ch => !ch.isAdult);
+      caChannels = caChannels.filter(ch => !ch.isAdult);
+      ugChannels = ugChannels.filter(ch => !ch.isAdult);
+      adultChannels = [];
+    }
+
+    allChannels = [...usChannels, ...caChannels, ...ugChannels, ...adultChannels];
 
     // Collect unique genres
     const genreSet = new Set();
@@ -215,11 +277,12 @@ async function refreshChannels() {
     allGenres = [...genreSet].sort();
 
     lastFetch = now;
-    log(`Loaded ${usChannels.length} US + ${caChannels.length} CA + ${adultChannels.length} Adult = ${allChannels.length} total channels`);
+    log(`Loaded ${usChannels.length} US + ${caChannels.length} CA + ${ugChannels.length} UG + ${adultChannels.length} Adult = ${allChannels.length} total channels`);
+    log(`Health filter=${HEALTH_FILTER} strictValidation=${STRICT_IPTV_VALIDATION} adult=${ENABLE_ADULT}`);
     log(`Found ${allGenres.length} genres: ${allGenres.slice(0, 15).join(', ')}...`);
 
-    // Run async health check on a sample
-    runHealthCheck();
+    // Run async health check on all channels.
+    runHealthCheck().catch(err => log(`Health check failed to start: ${err.message}`));
   } catch (err) {
     log(`ERROR fetching channels: ${err.message}`);
     // Keep old data if we have it
@@ -228,44 +291,99 @@ async function refreshChannels() {
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 let healthCheckDone = false;
+let healthCheckRunning = false;
+let lastHealthCheckAt = 0;
+
+async function probeStream(channel) {
+  try {
+    return await axios.head(channel.url, {
+      timeout: 6000,
+      maxRedirects: 3,
+      headers: channel.extraHeaders || {},
+      validateStatus: (status) => status >= 200 && status < 400,
+      httpAgent,
+      httpsAgent
+    });
+  } catch (headErr) {
+    const status = headErr?.response?.status;
+    // Some IPTV hosts reject HEAD; fall back to a tiny ranged GET.
+    if (![400, 401, 403, 405].includes(status)) throw headErr;
+
+    const response = await axios.get(channel.url, {
+      timeout: 6000,
+      maxRedirects: 3,
+      responseType: 'stream',
+      headers: { ...(channel.extraHeaders || {}), Range: 'bytes=0-0' },
+      validateStatus: (code) => code >= 200 && code < 400,
+      httpAgent,
+      httpsAgent
+    });
+
+    // Ensure ranged probe does not keep downloading.
+    if (response?.data && typeof response.data.destroy === 'function') {
+      response.data.destroy();
+    }
+
+    return response;
+  }
+}
 
 async function checkStreamHealth(channel) {
   const start = Date.now();
   try {
-    await axios.head(channel.url, {
-      timeout: 6000,
-      maxRedirects: 3,
-      headers: channel.extraHeaders || {},
-      validateStatus: (status) => status < 500
-    });
-    channel.healthy = true;
+    const response = await probeStream(channel);
+    const contentType = normalizeContentType(response.headers['content-type']);
+    const validType = IPTV_VALID_CONTENT_TYPES.has(contentType) || looksLikeLiveStream(channel.url);
+
+    channel.healthy = STRICT_IPTV_VALIDATION ? validType : true;
     channel.responseMs = Date.now() - start;
-  } catch {
+    channel.contentType = contentType || null;
+    channel.lastHealthAt = new Date().toISOString();
+    channel.lastHealthError = channel.healthy
+      ? null
+      : `Unsupported content-type: ${contentType || 'unknown'}`;
+  } catch (err) {
     channel.healthy = false;
     channel.responseMs = 99999;
+    channel.lastHealthAt = new Date().toISOString();
+    channel.lastHealthError = err.message;
   }
 }
 
 // Run in batches to avoid hammering servers but still check ALL channels
 async function runHealthCheck() {
+  if (healthCheckRunning || allChannels.length === 0) return;
+
+  healthCheckRunning = true;
   const BATCH = 30;
   const channels = [...allChannels];
   log(`Running health check on all ${channels.length} channels in batches of ${BATCH}...`);
 
-  for (let i = 0; i < channels.length; i += BATCH) {
-    const batch = channels.slice(i, i + BATCH);
-    await Promise.allSettled(batch.map(ch => checkStreamHealth(ch)));
-  }
+  try {
+    for (let i = 0; i < channels.length; i += BATCH) {
+      const batch = channels.slice(i, i + BATCH);
+      await Promise.allSettled(batch.map(ch => checkStreamHealth(ch)));
+    }
 
-  const healthy = allChannels.filter(ch => ch.healthy).length;
-  const pct = Math.round((healthy / allChannels.length) * 100);
-  log(`Health check complete: ${healthy}/${allChannels.length} (${pct}%) streams live`);
-  healthCheckDone = true;
+    const healthy = allChannels.filter(ch => ch.healthy).length;
+    const pct = Math.round((healthy / allChannels.length) * 100);
+    log(`Health check complete: ${healthy}/${allChannels.length} (${pct}%) streams live`);
+    healthCheckDone = true;
+    lastHealthCheckAt = Date.now();
+  } finally {
+    healthCheckRunning = false;
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function channelToMeta(ch) {
-  const countryFlag = ch.country === 'us' ? '🇺🇸 USA' : ch.country === 'ca' ? '🇨🇦 Canada' : '🔞 Adult';
+  const countryFlag = ch.country === 'us'
+    ? '🇺🇸 USA'
+    : ch.country === 'ca'
+      ? '🇨🇦 Canada'
+      : ch.country === 'ug'
+        ? '🇺🇬 Uganda'
+        : '🔞 Adult';
   const qualityBadge = ch.quality ? ` (${ch.quality})` : '';
 
   return {
@@ -312,15 +430,22 @@ function channelToStream(ch) {
     }
   };
 
+  if (ch.extraHeaders || ch.contentType) {
+    const proxyHeaders = {};
+    if (ch.extraHeaders) proxyHeaders.request = ch.extraHeaders;
+    if (ch.contentType) proxyHeaders.response = { 'Content-Type': ch.contentType };
+    stream.behaviorHints.proxyHeaders = proxyHeaders;
+  }
+
   return stream;
 }
 
 // ─── Manifest ─────────────────────────────────────────────────────────────────
 const manifest = {
   id: 'community.freevie',
-  version: '2.1.1',
+  version: '2.2.1',
   name: 'Freevie — Live TV',
-  description: 'Free live TV channels from USA & Canada. Open source, self-hostable.',
+  description: 'Free live TV channels from USA, Canada & Uganda. Open source, self-hostable.',
   types: ['tv'],
   catalogs: [
     {
@@ -337,6 +462,16 @@ const manifest = {
       type: 'tv',
       id: 'freevie_ca',
       name: '🇨🇦 Canada TV',
+      extra: [
+        { name: 'genre', isRequired: false, options: [] },
+        { name: 'search', isRequired: false },
+        { name: 'skip', isRequired: false }
+      ]
+    },
+    {
+      type: 'tv',
+      id: 'freevie_ug',
+      name: '🇺🇬 Uganda TV',
       extra: [
         { name: 'genre', isRequired: false, options: [] },
         { name: 'search', isRequired: false },
@@ -376,19 +511,21 @@ const builder = new addonBuilder(manifest);
 // Catalog handler
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   if (type !== 'tv') return { metas: [] };
+  if (!ENABLE_ADULT && id === 'freevie_adult') return { metas: [] };
 
   await refreshChannels();
 
   let pool;
   if (id === 'freevie_us') pool = usChannels;
   else if (id === 'freevie_ca') pool = caChannels;
+  else if (id === 'freevie_ug') pool = ugChannels;
   else if (id === 'freevie_adult') pool = adultChannels;
   else pool = allChannels;
 
   let filtered = pool;
 
   // If health check is done, filter out dead streams from catalog
-  if (healthCheckDone) {
+  if (HEALTH_FILTER && healthCheckDone) {
     filtered = filtered.filter(ch => ch.healthy);
   }
 
@@ -451,8 +588,11 @@ builder.defineStreamHandler(async ({ type, id }) => {
   const QUALITY_SCORE = { 'SD': 0, '360p': 1, '240p': 2, 'HD': 3, 'FHD': 4, '4K': 5 };
 
   const candidates = [ch, ...alternatives]
-    // Drop streams that are dead OR took >3s to respond (will freeze/buffer badly)
-    .filter(c => c.healthy && (c.responseMs || 0) < 3000)
+    // Drop weak streams when health filtering is enabled.
+    .filter(c => {
+      if (!HEALTH_FILTER || !healthCheckDone) return true;
+      return c.healthy && (c.responseMs || 0) < 3000;
+    })
     .sort((a, b) => {
       // Faster response always wins
       const msDiff = (a.responseMs || 99999) - (b.responseMs || 99999);
@@ -499,11 +639,24 @@ const server = http.createServer(async (req, res) => {
     const healthData = {
       status: 'ok',
       version: manifest.version,
+      config: {
+        cacheTtlMs: CACHE_TTL,
+        healthFilter: HEALTH_FILTER,
+        strictIptvValidation: STRICT_IPTV_VALIDATION,
+        healthCheckIntervalMs: HEALTH_CHECK_INTERVAL,
+        adultCatalogEnabled: ENABLE_ADULT
+      },
       proxy: PROXY_HOST ? { enabled: true, host: PROXY_HOST } : { enabled: false },
       channels: {
         us: usChannels.length,
         ca: caChannels.length,
+        ug: ugChannels.length,
         total: allChannels.length
+      },
+      health: {
+        checkDone: healthCheckDone,
+        checkRunning: healthCheckRunning,
+        lastCheckAt: lastHealthCheckAt ? new Date(lastHealthCheckAt).toISOString() : null
       },
       genres: allGenres.length,
       lastRefresh: lastFetch ? new Date(lastFetch).toISOString() : null,
@@ -660,6 +813,9 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
 
     const dynamicManifest = JSON.parse(JSON.stringify(manifest));
+    if (!ENABLE_ADULT) {
+      dynamicManifest.catalogs = dynamicManifest.catalogs.filter(cat => cat.id !== 'freevie_adult');
+    }
     dynamicManifest.catalogs.forEach(cat => {
       const genreExtra = cat.extra.find(e => e.name === 'genre');
       if (genreExtra) genreExtra.options = allGenres;
@@ -713,6 +869,12 @@ async function start() {
 
   // Pre-fetch channels before server starts
   await refreshChannels();
+
+  if (HEALTH_CHECK_INTERVAL > 0) {
+    setInterval(() => {
+      runHealthCheck().catch(err => log(`Scheduled health check failed: ${err.message}`));
+    }, HEALTH_CHECK_INTERVAL);
+  }
 
   server.listen(PORT, () => {
     log(`✅ Freevie Live TV addon running at http://localhost:${PORT}`);
